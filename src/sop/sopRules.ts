@@ -1,7 +1,6 @@
 import {
   CTA_KEYWORDS,
   FORBIDDEN_REGULATIONS,
-  GENERIC_ALT,
   HOW_KEYWORDS,
   LEAD_TARGET_SENTENCES,
   LEAD_TARGET_WORDS,
@@ -130,7 +129,7 @@ function checkKeywordInTitle(parsed: ParsedArticle, keyword: string): CheckResul
 
 function checkLead(parsed: ParsedArticle): CheckResult {
   if (!parsed.lead.trim()) {
-    return result(3, 'failed', 'Lead/pembukaan tidak ditemukan setelah judul.', '');
+    return result(3, 'failed', 'Kalimat pembuka (lead) tidak ditemukan setelah judul. Tambahkan 2 kalimat singkat yang langsung masuk ke inti masalah.', parsed.title);
   }
   const wordsOk =
     Math.abs(parsed.leadWordCount - LEAD_TARGET_WORDS) <= LEAD_WORD_TOLERANCE;
@@ -146,7 +145,7 @@ function checkLead(parsed: ParsedArticle): CheckResult {
   return result(
     3,
     'failed',
-    `Lead harus 2 kalimat atau ~12 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
+    `Lead harus 2 kalimat atau sekitar 12 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
     parsed.lead,
   );
 }
@@ -155,24 +154,24 @@ function checkWhy(parsed: ParsedArticle): CheckResult {
   // Paragraph after lead = intro WHY
   const body = parsed.bodyParagraphs;
   if (body.length < 2) {
-    return result(4, 'failed', 'Paragraf intro (WHY) setelah lead belum ada.', '');
+    return result(4, 'failed', 'Paragraf pembuka (WHY) setelah lead belum ada. Jelaskan mengapa pembaca harus peduli pada masalah ini.', parsed.bodyParagraphs[0]?.text ?? parsed.lead ?? parsed.title);
   }
   const why = body[1];
   if (!containsUrgency(why.text)) {
     return result(
       4,
       'failed',
-      'Intro WHY belum memaparkan urgensi (tidak ada sinyal pentingnya topik).',
+      'Paragraf WHY belum menunjukkan urgensi/kenapa masalah ini penting. Gunakan kata seperti risiko, bahaya, kerugian, atau sebelum terlambat.',
       why.text,
     );
   }
-  return result(4, 'passed', 'Intro WHY memuat sinyal urgensi masalah.', '');
+  return result(4, 'passed', 'Paragraf WHY memuat sinyal urgensi masalah.', '');
 }
 
 function checkHow(parsed: ParsedArticle): CheckResult {
   const h2 = parsed.headings.filter((h) => h.level === 2);
   if (h2.length === 0) {
-    return result(5, 'failed', 'Belum ada subheading H2 untuk bagian prosedur (HOW).', '');
+    return result(5, 'failed', 'Belum ada subjudul H2 untuk bagian prosedur (HOW). Tambahkan H2 seperti "Langkah-langkah..." atau "Cara Mengajukan...".', parsed.title);
   }
   const hasHowSignal =
     containsAny(parsed.textContent, HOW_KEYWORDS) ||
@@ -181,7 +180,7 @@ function checkHow(parsed: ParsedArticle): CheckResult {
     return result(
       5,
       'failed',
-      'Bagian HOW belum menunjukkan prosedur/langkah yang jelas.',
+      'Bagian HOW belum menunjukkan langkah/prosedur yang jelas. Tambahkan urutan langkah atau penjelasan cara mengatasi masalah.',
       h2[0]?.text ?? '',
     );
   }
@@ -197,8 +196,8 @@ function checkWhat(parsed: ParsedArticle): CheckResult {
     return result(
       6,
       'failed',
-      'Bagian WHAT belum memuat data, fakta, atau indikator dukungan ahli.',
-      '',
+      'Bagian pendukung (WHAT) belum memuat data, fakta, atau pandangan ahli. Tambahkan angka, persen, kutipan, atau dasar hukum.',
+      parsed.bodyParagraphs[1]?.text ?? parsed.bodyParagraphs[0]?.text ?? parsed.lead ?? parsed.title,
     );
   }
   return result(6, 'passed', 'Ditemukan indikasi data/fakta/dukungan di artikel.', '');
@@ -208,7 +207,7 @@ function checkHeadingHierarchy(parsed: ParsedArticle): CheckResult {
   const h2 = parsed.headings.filter((h) => h.level === 2);
   const h3 = parsed.headings.filter((h) => h.level === 3);
   if (h2.length === 0) {
-    return result(7, 'failed', 'Struktur heading belum rapi: minimal satu H2 diperlukan.', '');
+    return result(7, 'failed', 'Struktur heading belum rapi: minimal butuh 1 subjudul H2 untuk membagi artikel.', parsed.title);
   }
   let seenH2 = false;
   for (const h of parsed.headings) {
@@ -217,13 +216,13 @@ function checkHeadingHierarchy(parsed: ParsedArticle): CheckResult {
       return result(
         7,
         'failed',
-        'H3 muncul sebelum H2 — hirarki heading tidak valid.',
+        'Subjudul H3 muncul sebelum H2. Pastikan urutannya H2 dulu, baru H3.',
         h.text,
       );
     }
   }
   if (h3.length > 0 && h2.length === 0) {
-    return result(7, 'failed', 'Ada H3 tanpa H2.', h3[0].text);
+    return result(7, 'failed', 'Ada H3 tanpa H2. Tambahkan H2 terlebih dahulu.', h3[0].text);
   }
   return result(7, 'passed', `Hirarki heading rapi (${h2.length} H2, ${h3.length} H3).`, '');
 }
@@ -253,8 +252,8 @@ function checkLanguage(parsed: ParsedArticle): CheckResult {
     return result(
       9,
       'failed',
-      'Gaya bahasa kurang akrab: kata ganti "Anda" belum digunakan.',
-      '',
+      'Gaya bahasa terlalu formal/jarak. Gunakan kata ganti "Anda" untuk berbicara langsung dengan pembaca, misalnya "Anda perlu tahu bahwa..."',
+      parsed.lead || parsed.bodyParagraphs[0]?.text || parsed.title,
     );
   }
   return result(9, 'passed', 'Artikel menggunakan sapaan "Anda" untuk pembaca.', '');
@@ -307,8 +306,8 @@ function checkTypos(parsed: ParsedArticle): CheckResult {
     return result(
       11,
       'failed',
-      `Terdeteksi indikasi typo format: ${issues.join(', ')}.`,
-      badLine?.trim() ?? '',
+      `Ditemukan masalah format/teks: ${issues.join(', ')}. Periksa kembali spasi dan tanda baca.`,
+      badLine?.trim() ?? parsed.lines.find((l) => l.trim().length > 0) ?? '',
     );
   }
   return result(11, 'passed', 'Tidak ada indikasi typo format ringan.', '');
@@ -325,8 +324,8 @@ function checkRegulation(parsed: ParsedArticle): CheckResult {
     return result(
       12,
       'failed',
-      'Belum ditemukan referensi regulasi hukum (misal: UU No. 20 Tahun 2016). Tambahkan dasar hukum yang masih berlaku.',
-      '',
+      'Belum ada dasar hukum seperti "UU No. 20 Tahun 2016" atau peraturan terkini. Tambahkan regulasi yang masih berlaku untuk memperkuat argumen.',
+      parsed.lead || parsed.bodyParagraphs[0]?.text || parsed.title,
     );
   }
 
@@ -356,8 +355,8 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     return result(
       16,
       'failed',
-      'Keyword utama kosong. Isi keyword untuk bisa mengevaluasi densitas dan distribusinya.',
-      '',
+      'Keyword utama belum diisi. Isi keyword dulu agar bisa dicek penyebarannya di artikel.',
+      parsed.title,
     );
   }
 
@@ -369,7 +368,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     return result(
       16,
       'failed',
-      `Densitas keyword terlalu rendah (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%.`,
+      `Keyword "${keyword}" terlalu jarang muncul (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%. Sebarkan di beberapa paragraf secara alami.`,
       parsed.lead || parsed.title,
     );
   }
@@ -377,7 +376,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     return result(
       16,
       'failed',
-      `Densitas keyword terlalu tinggi (${density.toFixed(2)}%). Berisiko keyword stuffing. Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%.`,
+      `Keyword "${keyword}" terlalu sering muncul (${density.toFixed(2)}%), risiko terlihat seperti spam. Kurangi dan gunakan sinonim.`,
       parsed.lead || parsed.title,
     );
   }
@@ -385,7 +384,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     return result(
       16,
       'failed',
-      'Keyword utama belum muncul di lead. Sebaiknya lead mengandung keyword agar fokus artikel jelas.',
+      `Keyword "${keyword}" belum muncul di lead. Sebaiknya kalimat pembuka mengandung keyword agar pembaca langsung paham topik.`,
       parsed.lead,
     );
   }
@@ -393,7 +392,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     return result(
       16,
       'failed',
-      'Keyword utama belum muncul di heading H2/H3. Tambahkan keyword pada subjudul untuk SEO yang lebih baik.',
+      `Keyword "${keyword}" belum muncul di subjudul H2/H3. Tambahkan di salah satu heading untuk memperkuat fokus artikel.`,
       parsed.headings[0]?.text ?? parsed.title,
     );
   }
@@ -401,7 +400,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
   return result(
     16,
     'passed',
-    `Densitas keyword ${density.toFixed(2)}% dengan distribusi di judul, lead, dan ${headingsWithKw} heading.`,
+    `Keyword "${keyword}" memiliki densitas ${density.toFixed(2)}% dan sudah muncul di judul, lead, dan ${headingsWithKw} heading.`,
     '',
   );
 }
@@ -477,11 +476,15 @@ function checkWeakWords(parsed: ParsedArticle): CheckResult {
   const power = POWER_WORDS.filter((w) => lower.includes(w));
 
   if (found.length > 0) {
+    const firstWeak = found[0];
+    const sentence = parsed.bodyParagraphs
+      .flatMap((p) => p.text.split(/[.!?]+/))
+      .find((s) => s.toLowerCase().includes(firstWeak));
     return result(
       19,
       'failed',
-      `Ditemukan kata lemah yang mengurangi kekuatan argumen: ${found.join(', ')}. Ganti dengan kata tegas atau kuat.`,
-      found[0],
+      `Ditemukan kata lemah yang membuat argumen terasa ragu-ragu: "${found.join(', ')}". Ganti dengan kata yang lebih tegas dan meyakinkan.`,
+      sentence?.trim() || firstWeak,
     );
   }
   if (power.length < 2) {
@@ -489,7 +492,7 @@ function checkWeakWords(parsed: ParsedArticle): CheckResult {
       19,
       'failed',
       'Artikel kurang memiliki kata kuat/persuasif. Tambahkan istilah seperti wajib, risiko, sanksi, atau lindungi untuk memperkuat pesan.',
-      '',
+      parsed.bodyParagraphs[0]?.text || parsed.lead || parsed.title,
     );
   }
   return result(
@@ -539,7 +542,6 @@ function checkLinks(parsed: ParsedArticle): CheckResult {
     }
   }
 
-  // Also count comma-separated links on same "Baca juga" line
   const contextualLinks = contentLinks.length;
   const internalOk = contextualLinks >= MIN_INTERNAL_LINKS;
   const suggestedOk = suggestedCount >= MIN_SUGGESTED_POSTS;
@@ -552,27 +554,27 @@ function checkLinks(parsed: ParsedArticle): CheckResult {
     return result(
       13,
       'failed',
-      `Dibutuhkan minimal ${MIN_INTERNAL_LINKS} internal link dan ${MIN_SUGGESTED_POSTS} suggested posts. Saat ini link=${contextualLinks}, suggested≈${suggestedCount}.`,
-      snippet,
+      `Artikel butuh minimal ${MIN_INTERNAL_LINKS} link internal dan ${MIN_SUGGESTED_POSTS} artikel terkait. Saat ini: link internal=${contextualLinks}, artikel terkait≈${suggestedCount}.`,
+      snippet || parsed.bodyParagraphs[parsed.bodyParagraphs.length - 1]?.text || parsed.title,
     );
   }
   return result(
     13,
     'passed',
-    `Internal link (${contextualLinks}) dan suggested posts (${suggestedCount}) memadai.`,
+    `Link internal (${contextualLinks}) dan artikel terkait (${suggestedCount}) sudah memenuhi target.`,
     '',
   );
 }
 
 function checkMeta(metaTitle: string, metaDesc: string): CheckResult {
   if (!metaTitle.trim() || !metaDesc.trim()) {
-    return result(14, 'failed', 'Meta title dan/atau meta description masih kosong.', metaTitle || metaDesc);
+    return result(14, 'failed', 'Meta title dan/atau meta description masih kosong. Isi keduanya agar artikel siap tampil di hasil pencarian.', metaTitle || metaDesc || '');
   }
   if (metaTitle.length > MAX_META_TITLE_CHARS) {
     return result(
       14,
       'failed',
-      `Meta title melebihi ${MAX_META_TITLE_CHARS} karakter (${metaTitle.length}).`,
+      `Meta title terlalu panjang (${metaTitle.length} karakter). Maksimal ${MAX_META_TITLE_CHARS} karakter.`,
       metaTitle,
     );
   }
@@ -580,52 +582,16 @@ function checkMeta(metaTitle: string, metaDesc: string): CheckResult {
     return result(
       14,
       'failed',
-      `Meta description melebihi ${MAX_META_DESC_CHARS} karakter (${metaDesc.length}).`,
+      `Meta description terlalu panjang (${metaDesc.length} karakter). Maksimal ${MAX_META_DESC_CHARS} karakter.`,
       metaDesc,
     );
   }
-  return result(14, 'passed', 'Meta title dan description terisi dalam batas karakter.', '');
+  return result(14, 'passed', 'Meta title dan description sudah terisi dengan panjang yang sesuai.', '');
 }
 
-function checkAltText(parsed: ParsedArticle, keyword: string): CheckResult {
-  if (parsed.images.length === 0) {
-    return result(
-      15,
-      'failed',
-      'Tidak ada gambar dengan alt text. Tambahkan ![deskripsi](url).',
-      '',
-    );
-  }
-  const bad = parsed.images.find((img) => {
-    const alt = img.alt.trim().toLowerCase();
-    return !alt || GENERIC_ALT.includes(alt) || alt.length < 8;
-  });
-  if (bad) {
-    return result(
-      15,
-      'failed',
-      'Alt text gambar kosong, generik, atau terlalu pendek.',
-      bad.raw,
-    );
-  }
-
-  const kw = keyword.trim().toLowerCase();
-  const irrelevant = parsed.images.find((img) => {
-    const alt = img.alt.toLowerCase();
-    const titleWords = parsed.title.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-    const hasTopic = kw ? alt.includes(kw) : titleWords.some((w) => alt.includes(w));
-    return !hasTopic;
-  });
-  if (irrelevant) {
-    return result(
-      15,
-      'failed',
-      `Alt text gambar "${irrelevant.alt}" kurang relevan dengan topik artikel. Tambahkan kata yang menggambarkan isi visual dan kaitannya dengan topik.`,
-      irrelevant.raw,
-    );
-  }
-
-  return result(15, 'passed', 'Alt text gambar deskriptif dan relevan dengan topik.', '');
+function checkAltText(_parsed: ParsedArticle, _keyword: string): CheckResult {
+  // Editor no longer supports images — always deferred
+  return result(15, 'deferred', 'Pengecekan alt text tidak aktif karena editor ini tidak mendukung gambar.', '');
 }
 
 export function runSopChecks(input: ArticleInput): SopReport {
@@ -643,14 +609,14 @@ export function runSopChecks(input: ArticleInput): SopReport {
     checkCta(parsed),
     checkTypos(parsed),
     checkRegulation(parsed),
-    checkLinks(parsed),
-    checkMeta(input.metaTitle, input.metaDesc),
-    checkAltText(parsed, input.keyword),
     checkKeywordDensity(parsed, input.keyword),
     checkSentenceLength(parsed),
     checkHeadingQuality(parsed, input.keyword),
     checkWeakWords(parsed),
     checkWordCount(parsed),
+    checkLinks(parsed),
+    checkMeta(input.metaTitle, input.metaDesc),
+    checkAltText(parsed, input.keyword),
   ];
   return calculateSopScore(items, parsed.wordCount);
 }

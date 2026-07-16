@@ -1,1062 +1,1670 @@
-import { useState, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import * as pdfjs from 'pdfjs-dist';
+import mammoth from 'mammoth';
+
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
 import {
-  CheckCircle,
-  XCircle,
-  AlertTriangle,
-  Loader,
-  FileText,
-  Send,
-  Check,
   Bold,
   Italic,
+  Underline,
   Heading1,
   Heading2,
   Heading3,
   List,
   ListOrdered,
-  Image as ImageIcon,
+  Quote,
   Link as LinkIcon,
-  Eraser,
-  Eye,
-  ListChecks,
-  Scale,
-  ShieldCheck,
-  Sparkles,
-  BookOpen,
-  MinusCircle,
-  CircleHelp,
   Upload,
-} from 'lucide-react';
-import {
-  autoReviseItem,
-  calculateSopScore,
-  evaluateWithAI,
-  runSopChecks,
-  TARGET_WORD_MAX,
-  TARGET_WORD_MIN,
-  type CheckResult,
-  type SopReport,
-} from './sop';
+  BookOpen,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
 
-const STATUS_GUIDE: Record<string, string> = {
-  HIJAU: 'Semua poin checklist sudah terpenuhi. Artikel siap diterbitkan oleh Manager.',
-  KUNING: 'Ada 1–2 poin yang belum sesuai SOP. Perbaiki bagian tersebut sebelum upload CMS.',
-  MERAH: 'Ada 3 atau lebih poin yang belum sesuai. Perlu perbaikan besar atau penulisan ulang.',
+  Sparkles,
+  BrainCircuit,
+  Target,
+  Scale,
+  Loader,
+  Image as ImageIcon,
+  Bot,
+  RotateCcw,
+} from 'lucide-react';
+import { runSopChecks, evaluateWithAI, autoReviseItem, callOllamaGenerateKeyword, type CheckResult, type SopReport } from './sop';
+import { callArticleChat } from './sop/articleChat';
+import { OLLAMA_API_KEY } from './sop/config';
+
+const CATEGORIES = [
+  { id: 'title', label: 'Judul', checks: [1, 2] },
+  { id: 'lead', label: 'Lead', checks: [3, 4] },
+  { id: 'paragraph', label: 'Paragraf', checks: [8, 17, 20] },
+  { id: 'heading', label: 'Heading', checks: [7, 18] },
+  { id: 'body', label: 'Isi Tubuh', checks: [5, 6, 12] },
+  { id: 'language', label: 'Bahasa', checks: [9, 11, 19] },
+  { id: 'cta', label: 'CTA', checks: [10] },
+  { id: 'seo', label: 'SEO & Meta', checks: [13, 14, 15, 16] },
+];
+
+const SUGGESTED_LABELS: Record<number, string> = {
+  3: 'Buat lead 2 kalimat / ~12 kata yang langsung ke inti masalah.',
+  4: 'Tambahkan alasan mengapa masalah ini penting/urgent di paragraf setelah lead.',
+  8: 'Pecah paragraf panjang menjadi maksimal 3 kalimat per paragraf.',
+  10: 'Tambahkan ajakan bertindak (CTA) yang persuasif di akhir artikel.',
+  13: 'Tambahkan minimal 2 link internal dan 3 artikel terkait.',
+  14: 'Isi meta title dan meta description agar siap tampil di Google.',
+  15: 'Gambar tidak didukung di editor ini, pengecekan alt text diabaikan.',
+  17: 'Pecah kalimat panjang menjadi 2 kalimat agar lebih mudah dibaca.',
+  20: 'Panjang artikel idealnya 1000–1500 kata.',
 };
+
+function markdownToHtml(md: string): string {
+  if (!md.trim()) return '';
+
+  // Normalize line endings
+  let html = md.replace(/\r\n/g, '\n');
+
+  // Protect existing <mark> tags from HTML escaping (used for highlights)
+  const markTags: string[] = [];
+  html = html.replace(/<mark\b[^>]*>.*?<\/mark>/gs, (m) => {
+    markTags.push(m);
+    return `%%%MARK${markTags.length - 1}%%%`;
+  });
+
+  // Escape HTML special chars in text first, then selectively restore formatting
+  html = html
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  // Images (must be before links: ![alt](url) contains [text](url) pattern)
+  html = html.replace(/!\[(.*?)\]\((.*?)\s+"(\d+)"\)/g, '<img src="$2" alt="$1" width="$3" style="max-width:100%;border-radius:8px;" />');
+  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;" />');
+
+  // Links
+  html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" class="editor-link">$1</a>');
+  // Strip bare image file references (not markdown images)
+  html = html
+    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
+    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '');
+
+  // Bold & italic
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+  html = html.replace(/__(.*?)__/g, '<u>$1</u>');
+
+  // Headings
+  html = html.replace(/^#### (.*$)/gim, '<h4>$1</h4>');
+  html = html.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+  html = html.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+  html = html.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+  // Blockquote
+  html = html.replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>');
+
+  // Lists - simple line-by-line
+  const lines = html.split('\n');
+  let inList: 'ul' | 'ol' | null = null;
+  const out: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const ulMatch = trimmed.match(/^[-*+]\s+(.*)$/);
+    const olMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+
+    if (ulMatch) {
+      if (inList !== 'ul') {
+        if (inList) out.push(`</${inList}>`);
+        out.push('<ul>');
+        inList = 'ul';
+      }
+      out.push(`<li>${ulMatch[1]}</li>`);
+    } else if (olMatch) {
+      if (inList !== 'ol') {
+        if (inList) out.push(`</${inList}>`);
+        out.push('<ol>');
+        inList = 'ol';
+      }
+      out.push(`<li>${olMatch[1]}</li>`);
+    } else {
+      if (inList) {
+        out.push(`</${inList}>`);
+        inList = null;
+      }
+      if (trimmed === '') {
+        out.push('<br />');
+      } else {
+        out.push(`<p>${line}</p>`);
+      }
+    }
+  }
+  if (inList) out.push(`</${inList}>`);
+
+  let finalHtml = out.join('\n');
+
+  // Restore protected <mark> tags
+  finalHtml = finalHtml.replace(/%%%MARK(\d+)%%%/g, (_, i) => markTags[parseInt(i)]);
+
+  return finalHtml;
+}
+
+function htmlToMarkdown(html: string): string {
+  if (!html.trim()) return '';
+
+  const div = document.createElement('div');
+  div.innerHTML = html;
+
+  function walk(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || '';
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    const children = Array.from(el.childNodes)
+      .map(walk)
+      .join('')
+      .trim();
+
+    switch (tag) {
+      case 'h1':
+        return `\n# ${children}\n`;
+      case 'h2':
+        return `\n## ${children}\n`;
+      case 'h3':
+        return `\n### ${children}\n`;
+      case 'h4':
+      case 'h5':
+      case 'h6':
+        return `\n### ${children}\n`;
+      case 'strong':
+      case 'b':
+        return `**${children}**`;
+      case 'em':
+      case 'i':
+        return `*${children}*`;
+      case 'u':
+        return `__${children}__`;
+      case 'a':
+        return `[${children}](${el.getAttribute('href') || '#'})`;
+      case 'br':
+        return '\n';
+      case 'li':
+        return children;
+      case 'ul':
+        return (
+          '\n' +
+          Array.from(el.children)
+            .map((li) => `- ${walk(li).trim()}`)
+            .join('\n') +
+          '\n'
+        );
+      case 'ol':
+        return (
+          '\n' +
+          Array.from(el.children)
+            .map((li, i) => `${i + 1}. ${walk(li).trim()}`)
+            .join('\n') +
+          '\n'
+        );
+      case 'blockquote':
+        return `\n> ${children}\n`;
+      case 'p':
+      case 'div':
+        return `${children}\n`;
+      case 'img':
+        const src = el.getAttribute('src') || '';
+        const alt = el.getAttribute('alt') || '';
+        const w = el.getAttribute('width') || el.style.width;
+        return w ? `![${alt}](${src} "${w}")\n` : `![${alt}](${src})\n`;
+      case 'mark':
+        return children;
+      default:
+        return children;
+    }
+  }
+
+  return walk(div)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function findTextMatch(text: string, query: string): { start: number; end: number } | null {
+  if (!query) return null;
+  const q = query.replace(/\s+/g, ' ').trim();
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tryMatch = (str: string): { start: number; end: number } | null => {
+    const escaped = esc(str).replace(/ /g, '\\s+');
+    const re = new RegExp(escaped, 'i');
+    const m = re.exec(text);
+    return m ? { start: m.index, end: m.index + m[0].length } : null;
+  };
+
+  let r = tryMatch(q);
+  if (r) return r;
+
+  const clean = q.replace(/[.!?,;:]+$/g, '');
+  if (clean.length > 10) { r = tryMatch(clean); if (r) return r; }
+
+  const firstSen = q.split(/[.!?]/)[0];
+  if (firstSen && firstSen.length > 10) { r = tryMatch(firstSen); if (r) return r; }
+
+  return null;
+}
+
+function getTextContent(html: string): string {
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  return div.textContent || '';
+}
+
+function getStatusConfig(report: SopReport) {
+  const { label } = report.status;
+  if (label === 'HIJAU') {
+    return {
+      label: 'Layak Publish',
+      desc: 'Artikel memenuhi standar SOP.',
+      color: 'text-emerald-700',
+      bg: 'bg-emerald-50',
+      border: 'border-emerald-200',
+    };
+  }
+  if (label === 'KUNING') {
+    return {
+      label: 'Revisi Minor',
+      desc: 'Beberapa poin kecil perlu diperbaiki.',
+      color: 'text-amber-700',
+      bg: 'bg-amber-50',
+      border: 'border-amber-200',
+    };
+  }
+  return {
+    label: 'Revisi Besar',
+    desc: 'Artikel butuh perbaikan signifikan.',
+    color: 'text-red-700',
+    bg: 'bg-red-50',
+    border: 'border-red-200',
+  };
+}
+
+function getCategoryStatus(report: SopReport, categoryId: string) {
+  const cat = CATEGORIES.find((c) => c.id === categoryId);
+  if (!cat) return 'passed';
+  const items = report.items.filter((item) => cat.checks.includes(item.id));
+  if (items.some((item) => item.status === 'failed')) return 'failed';
+  if (items.some((item) => item.status === 'deferred')) return 'deferred';
+  return 'passed';
+}
+
+function getCategoryIssue(report: SopReport, categoryId: string) {
+  const cat = CATEGORIES.find((c) => c.id === categoryId);
+  if (!cat) return null;
+  return report.items.find((item) => cat.checks.includes(item.id) && item.status === 'failed');
+}
+
+function generateSummary(report: SopReport) {
+  const failedCategories = CATEGORIES.filter((c) => getCategoryStatus(report, c.id) === 'failed');
+  if (failedCategories.length === 0) {
+    return 'Semua poin kualitas sudah terpenuhi. Artikel siap diterbitkan.';
+  }
+  const issueNames = failedCategories.map((c) => c.label);
+  return `Ditemukan ${failedCategories.length} area yang perlu diperbaiki: ${issueNames.join(', ')}.`;
+}
+
+function findTextNodeAndOffset(container: HTMLElement, globalOffset: number): [Node, number] | null {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+  let currentOffset = 0;
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const textLength = node.textContent?.length || 0;
+    if (currentOffset + textLength >= globalOffset) {
+      return [node, globalOffset - currentOffset];
+    }
+    currentOffset += textLength;
+  }
+  return null;
+}
 
 export default function App() {
   const [article, setArticle] = useState('');
+  const [htmlContent, setHtmlContent] = useState('');
   const [keyword, setKeyword] = useState('');
   const [metaTitle, setMetaTitle] = useState('');
   const [metaDesc, setMetaDesc] = useState('');
-
-  const [isChecking, setIsChecking] = useState(false);
+  const [liveReport, setLiveReport] = useState<SopReport | null>(null);
   const [report, setReport] = useState<SopReport | null>(null);
-  const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState('preview');
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [aiResults, setAiResults] = useState<CheckResult[] | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [hover, setHover] = useState<{ x: number; y: number; issue: CheckResult } | null>(null);
+  const [fixingId, setFixingId] = useState<number | null>(null);
+  const [flashText, setFlashText] = useState('');
+  const [showKwPopup, setShowKwPopup] = useState(false);
+  const [kwGenLoading, setKwGenLoading] = useState(false);
+  const [kwGenError, setKwGenError] = useState('');
+  const selectedImgRef = useRef<HTMLImageElement | null>(null);
+  const [selectedImgInfo, setSelectedImgInfo] = useState<{ width: number; align: string; x: number; y: number } | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const [showResetModal, setShowResetModal] = useState(false);
 
-  const [correctingId, setCorrectingId] = useState<number | null>(null);
-  const [toastMsg, setToastMsg] = useState('');
-  const [isUploading, setIsUploading] = useState(false);
-  const [apiKey, setApiKey] = useState('');
-  const [isAiEvaluating, setIsAiEvaluating] = useState(false);
+  const stripImages = (text: string) => text
+    .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
+    .replace(/\[[^\]]*\]:\s*\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)/gi, '')
+    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '')
+    .trim();
 
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorRef = useRef<HTMLDivElement>(null);
+  const editorWrapperRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const undoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
 
-  const applyFormat = (prefix: string, suffix = '') => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selectedText = article.substring(start, end);
-
-    const newText =
-      article.substring(0, start) + prefix + selectedText + suffix + article.substring(end);
-    setArticle(newText);
-
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start + prefix.length, end + prefix.length);
-    }, 0);
+  const pushUndo = () => {
+    undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
+    if (undoStackRef.current.length > 20) undoStackRef.current.shift();
   };
 
-  const stripMarkdown = () => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const selectedText = article.substring(start, end);
-
-    const cleaned = selectedText
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/__(.*?)__/g, '$1')
-      .replace(/_(.*?)_/g, '$1')
-      .replace(/^#+\s*/gm, '')
-      .replace(/^[-*]\s+/gm, '')
-      .replace(/^\d+\.\s+/gm, '')
-      .replace(/!\[(.*?)\]\(.*?\)/g, '$1')
-      .replace(/\[(.*?)\]\(.*?\)/g, '$1');
-
-    const newText = article.substring(0, start) + cleaned + article.substring(end);
-    setArticle(newText);
-
-    setTimeout(() => {
-      textarea.focus();
-      textarea.setSelectionRange(start, start + cleaned.length);
-    }, 0);
+  const handleUndo = () => {
+    const state = undoStackRef.current.pop();
+    if (!state) return;
+    setHover(null);
+    setKeyword(state.keyword);
+    setMetaTitle(state.metaTitle);
+    setMetaDesc(state.metaDesc);
+    setArticleFromMarkdown(state.article);
+    const restored = runSopChecks({
+      article: state.article,
+      keyword: state.keyword,
+      metaTitle: state.metaTitle,
+      metaDesc: state.metaDesc,
+    });
+    setLiveReport(restored);
+    setReport(restored);
+    requestAnimationFrame(() => applyHighlights(restored));
   };
 
-  const mockArticles = [
-    {
-      keyword: 'syarat perjanjian kerjasama',
-      metaTitle: 'Pembahasan Mengenai Syarat Kontrak Bisnis',
-      metaDesc: 'Pembahasan mengenai syarat sah perjanjian kontrak dalam hukum bisnis di Indonesia.',
-      article: `# Pembahasan Mengenai Syarat Kontrak Bisnis
-Setiap perjanjian yang dibuat secara sah berlaku sebagai undang-undang bagi para pihak. Pahami syarat sah kontrak agar bisnis Anda aman.
+  const handleUndoRef = useRef(handleUndo);
+  handleUndoRef.current = handleUndo;
 
-Ketidakpahaman terhadap dasar hukum perjanjian dapat menyebabkan kerugian finansial yang signifikan. Banyak pengusaha baru yang menyesal karena klausul kontrak yang tidak jelas.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndoRef.current();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
 
-## 1. Syarat Sah Perjanjian
-Pasal 1320 KUH Perdata menyebutkan empat syarat sah perjanjian: kesepakatan para pihak, kecakapan hukum, objek tertentu, dan causa yang halal.
+  useEffect(() => {
+    const update = () => {
+      const editor = editorRef.current;
+      if (!editor) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      const sel = document.getSelection();
+      if (!sel || sel.rangeCount === 0) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      let img: HTMLImageElement | null = null;
+      const r = sel.getRangeAt(0);
+      if (r.startContainer === r.endContainer && r.startOffset + 1 === r.endOffset) {
+        const n = r.startContainer.childNodes[r.startOffset];
+        if (n && (n as HTMLElement).tagName === 'IMG') img = n as HTMLImageElement;
+      }
+      if (!img) {
+        let n = sel.anchorNode;
+        if (n && n.nodeType === Node.TEXT_NODE && n.parentElement) n = n.parentElement;
+        if (n && (n as HTMLElement).tagName === 'IMG') img = n as HTMLImageElement;
+      }
+      if (img && editor.contains(img)) {
+        selectedImgRef.current = img;
+        const rect = img.getBoundingClientRect();
+        const wr = editor.parentElement!.getBoundingClientRect();
+        setSelectedImgInfo({
+          width: img.width || parseInt(img.style.width) || 300,
+          align: img.style.display === 'block' && img.style.marginLeft === 'auto' && img.style.marginRight === 'auto' ? 'center'
+            : img.style.display === 'block' && img.style.marginLeft === 'auto' ? 'right'
+            : 'inline',
+          x: rect.left - wr.left + rect.width / 2,
+          y: rect.top - wr.top - 44,
+        });
+      } else {
+        selectedImgRef.current = null;
+        setSelectedImgInfo(null);
+      }
+    };
+    document.addEventListener('selectionchange', update);
+    document.addEventListener('mouseup', update);
+    return () => { document.removeEventListener('selectionchange', update); document.removeEventListener('mouseup', update); };
+  }, []);
 
-## 2. Akibat Hukum jika Syarat Tidak Terpenuhi
-Jika salah satu syarat tidak dipenuhi, perjanjian dapat batal demi hukum atau dapat dibatalkan melalui pengadilan.
+  useEffect(() => {
+    if (!article.trim()) {
+      setLiveReport(null);
+      return;
+    }
+    const next = runSopChecks({ article, keyword, metaTitle, metaDesc });
+    setLiveReport(next);
+  }, [article, keyword, metaTitle, metaDesc]);
 
-Menurut data Mahkamah Agung, lebih dari 40% perkara perdata yang masuk ke pengadilan negeri berkaitan dengan sengketa kontrak. Ini menunjukkan betapa pentingnya memahami syarat sah perjanjian.
+  const score = useMemo(() => {
+    if (!report) return 0;
+    return Math.round((report.score / report.scoredTotal) * 100);
+  }, [report]);
 
-Baca juga: [Akta Notaris vs Akta Bawah Tangan](#), [Hukum Perusahaan](#), [Tips Memilih Lawyer](#)
-Internal Link: [Layanan Review Kontrak](#), [Konsultasi Hukum Perusahaan](#)
+  const statusConfig = useMemo(() => (report ? getStatusConfig(report) : null), [report]);
 
-![Ilustrasi perjanjian kontrak bisnis di atas meja](kontrak.jpg)
-
-Butuh bantuan menyusun kontrak bisnis yang aman? Konsultasikan dengan tim legal kami hari ini juga!` },
-    {
-      keyword: 'mendirikan pt perorangan',
-      metaTitle: '5 Langkah Mudah Mendirikan PT Perorangan 2026',
-      metaDesc: 'Panduan langkah demi langkah mendirikan PT Perorangan tanpa minimal modal. Cocok untuk UMKM dan startup pemula.',
-      article: `# 5 Langkah Mudah Mendirikan PT Perorangan 2026
-PT Perorangan adalah solusi badan hukum bagi UMKM. Prosesnya mudah dan cepat. Anda tidak perlu modal besar untuk memulainya.
-
-Sejak diterbitkannya UU Cipta Kerja, proses pendirian PT Perorangan menjadi sangat sederhana dan terjangkau. Banyak pelaku usaha yang sudah beralih ke bentuk badan hukum ini. Sayangnya masih banyak yang belum memahami prosedur pendaftarannya. Inilah panduan lengkap untuk Anda.
-
-## 1. Siapkan Dokumen Persyaratan Anda harus menyiapkan KTP, NPWP, dan surat pernyataan pendirian. Anda bisa mengunduh format surat pernyataan dari website resmi Kemenkumham. Proses ini tidak memakan waktu lama jika dokumen sudah lengkap.
-
-## 2. Daftar Melalui SISMINAKUM Pendaftaran dilakukan secara online melalui sistem SISMINAKUM. Biaya pendaftaran sangat terjangkau, hanya sekitar Rp 50 ribu. Proses verifikasi biasanya memakan waktu 1-3 hari kerja.
-
-## 3. Buat NPWP Perusahaan Setelah akta terbit, segera daftarkan NPWP perusahaan. NPWP diperlukan untuk membuka rekening bank dan keperluan perpajakan.
-
-Baca juga: [Perbedaan PT dan CV](#), [Biaya Pendirian Badan Usaha](#), [Cara Bayar Pajak Badan Usaha](#)
-Internal Link: [Jasa Pendirian PT Perorangan](#), [Konsultasi Legal UMKM](#)
-
-![Proses pendaftaran PT Perorangan melalui komputer](pt-perorangan.jpg)
-
-Siap mendirikan PT Perorangan? Tim legal kami siap membantu Anda dari awal hingga akta terbit. Hubungi kami sekarang!` },
-    {
-      keyword: 'hak cipta konten digital',
-      metaTitle: '3 Cara Melindungi Hak Cipta Konten Digital',
-      metaDesc: 'Lindungi konten digital Anda dari pembajakan. Pahami prosedur pencatatan hak cipta dan langkah perlindungan hukumnya.',
-      article: `# 3 Cara Melindungi Hak Cipta Konten Digital
-Konten digital adalah aset berharga yang perlu dilindungi secara hukum. Catatkan hak cipta Anda agar tidak diklaim pihak lain.
-
-Proses pencatatan hak cipta bisa dilakukan secara online melalui DJKI. Biayanya pun terjangkau untuk kreator individu.
-
-## 1. Buat Karya yang Orisinal
-Pastikan konten yang Anda buat benar-benar hasil karya sendiri. Hak cipta lahir secara otomatis, tetapi pencatatan memberikan bukti hukum yang kuat.
-
-## 2. Catatkan di e-Hak Cipta DJKI
-Pendaftaran dilakukan melalui portal e-Hak Cipta. Siapkan KTP, NPWP, dan contoh karya. Biaya pendaftaran mulai dari Rp 200 ribu.
-
-## 3. Gunakan Lisensi
-Tambahkan lisensi Creative Commons untuk mengatur penggunaan karya Anda oleh pihak lain.
-
-Baca juga: [Perbedaan Hak Cipta dan Paten](#), [Cara Lapor Pelanggaran Hak Cipta](#)
-Internal Link: [Layanan Pencatatan Hak Cipta](#)
-
-![gambar](hak-cipta.jpg)
-
-Hubungi kami.` },
-    {
-      keyword: 'legalitas content creator',
-      metaTitle: 'Panduan Legalitas untuk Content Creator Pemula',
-      metaDesc: 'Pahami kewajiban hukum sebagai content creator agar terhindar dari sengketa kontrak dan masalah perpajakan.',
-      article: `# Panduan Legalitas untuk Content Creator Pemula
-Menjadi content creator bukan sekadar membuat konten viral. Kamu perlu memahami aspek legal agar karier kamu aman ke depannya.
-
-Banyak kreator pemula yang terkena masalah hukum karena tidak memiliki perjanjian kerja sama yang jelas dengan brand.
-
-## 1. Urus NPWP
-Setiap kreator yang memiliki penghasilan wajib memiliki NPWP. Untuk omzet besar, pertimbangkan membuat PT Perorangan.
-
-## 2. Buat Perjanjian Kerja Sama
-Setiap endorse harus ada perjanjian tertulis. Cantumkan jumlah tayangan, tenggat waktu, dan pembayaran.
-
-## 3. Patuhi Aturan Iklan
-Konten endorse wajib mencantumkan keterangan #ad atau #sponsored. Ini diatur oleh pedoman OJK dan BPKN.
-
-Baca juga: [Pajak Penghasilan Kreator](#), [Cara Membuat Kontrak Endorse](#), [Perlindungan Konten Digital](#)
-Internal Link: [Konsultasi Legal Kreator](#), [Jasa Pembuatan Kontrak](#)
-
-![gambar](content-creator.jpg)
-
-Butuh bantuan mengurus legalitas sebagai kreator? Tim kami siap membantu kamu dari awal hingga akhir.` },
-    {
-      keyword: 'perjanjian kerjasama',
-      metaTitle: 'Panduan Lengkap Membuat Perjanjian Kerjasama Bisnis yang Kuat dan Mengikat Hukum',
-      metaDesc: '',
-      article: `# Panduan Lengkap Membuat Perjanjian Kerjasama Bisnis
-Setiap kerjasama bisnis harus didasari perjanjian yang jelas. Tanpa perjanjian tertulis, risiko sengketa sangat tinggi dan bisa merugikan kedua belah pihak.
-
-Banyak pelaku usaha yang mengabaikan pentingnya perjanjian tertulis karena alasan kepercayaan. Padahal, sengketa bisnis sering muncul justru di antara pihak yang saling percaya. Perlindungan hukum yang paling kuat adalah dokumen yang sah.
-
-## 1. Identitas Para Pihak
-Cantumkan nama lengkap, alamat, dan kedudukan hukum masing-masing pihak dengan benar.
-
-## 2. Objek Kerjasama
-Jelaskan secara rinci barang atau jasa yang menjadi objek perjanjian. Semakin detail semakin baik untuk menghindari multitafsir.
-
-## 3. Jangka Waktu
-Tentukan kapan perjanjian mulai berlaku dan kapan berakhir. Sertakan juga opsi perpanjangan jika diperlukan.
-
-## 4. Penyelesaian Sengketa
-Pilih forum penyelesaian sengketa: pengadilan atau arbitrase. Cantumkan domisili hukum yang jelas.
-
-Menurut data pengadilan negeri, sengketa kontrak menjadi salah satu perkara perdata yang paling sering ditangani setiap tahunnya. Oleh karena itu, perjanjian yang baik adalah investasi jangka panjang.
-
-Pastikan setiap perjanjian yang Anda buat sudah memenuhi syarat sah sesuai Pasal 1320 KUH Perdata. Konsultasikan dengan ahli hukum untuk hasil yang maksimal.` },
-  ];
-
-  const loadMockArticle = () => {
-    const pick = mockArticles[Math.floor(Math.random() * mockArticles.length)];
-    setKeyword(pick.keyword);
-    setMetaTitle(pick.metaTitle);
-    setMetaDesc(pick.metaDesc);
-    setArticle(pick.article);
-  };
-
-  const STOP_WORDS = new Set([
-    'cara', 'untuk', 'yang', 'dan', 'dari', 'dengan', 'pada', 'di', 'ke', 'membuat', 'panduan', 'lengkap',
-    'tips', 'langkah', 'mudah', 'anda', 'bisa', 'akan', 'adalah', 'ini', 'itu', 'atau', 'saja', 'juga', 'oleh',
-    'dalam', 'per', 'usaha', 'bisnis', 'hukum', 'legal', 'bagaimana', 'mengapa', 'apa', 'sudah', 'belum', 'dapat',
-    'agar', 'bagi', 'supaya', 'dalam', 'pada', 'dari', 'dengan', 'untuk', 'sebuah', 'beberapa', 'seluruh', 'setiap',
-  ]);
-
-  function deriveKeyword(title: string) {
-    const words = title
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/gi, '')
+  const wordCount = useMemo(() => {
+    return getTextContent(htmlContent)
       .split(/\s+/)
-      .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
-    if (words.length >= 2) return `${words[0]} ${words[1]}`;
-    if (words.length === 1) return words[0];
-    return title.toLowerCase().split(/\s+/).filter((w) => w.length > 2).slice(0, 2).join(' ') || title;
-  }
+      .filter(Boolean).length;
+  }, [htmlContent]);
 
-  function extractDocumentMetadata(text: string) {
-    const lines = text
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
+  const syncFromEditor = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const html = editor.innerHTML;
+    setHtmlContent(html);
+    setArticle(htmlToMarkdown(html));
+  };
 
-    if (lines.length === 0) return { title: '', description: '', keyword: '' };
+  const setEditorHtml = (html: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.innerHTML = html;
+  };
 
-    let title = lines[0].replace(/^#+\s*/, '').trim();
-    if (title.length > 60) title = title.slice(0, 60);
+  const setArticleFromMarkdown = (md: string) => {
+    setArticle(md);
+    const html = markdownToHtml(md);
+    setHtmlContent(html);
+    setEditorHtml(html);
+  };
 
-    let description = '';
-    for (let i = 1; i < lines.length; i += 1) {
-      const line = lines[i];
-      if (
-        line.length > 20 &&
-        !line.startsWith('#') &&
-        !line.startsWith('![') &&
-        !line.startsWith('Baca juga:') &&
-        !line.startsWith('Internal Link:')
-      ) {
-        description = line;
+  const handleToolbar = (action: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+
+    switch (action) {
+      case 'h1':
+        document.execCommand('formatBlock', false, 'H1');
+        break;
+      case 'h2':
+        document.execCommand('formatBlock', false, 'H2');
+        break;
+      case 'h3':
+        document.execCommand('formatBlock', false, 'H3');
+        break;
+      case 'bold':
+        document.execCommand('bold');
+        break;
+      case 'italic':
+        document.execCommand('italic');
+        break;
+      case 'underline':
+        document.execCommand('underline');
+        break;
+      case 'bullet':
+        document.execCommand('insertUnorderedList');
+        break;
+      case 'number':
+        document.execCommand('insertOrderedList');
+        break;
+      case 'quote':
+        document.execCommand('formatBlock', false, 'blockquote');
+        break;
+      case 'link': {
+        const url = window.prompt('Masukkan URL:', 'https://');
+        if (url) document.execCommand('createLink', false, url);
         break;
       }
     }
-    if (description.length > 160) {
-      description = description.slice(0, 157).trim() + '...';
-    }
 
-    const keyword = deriveKeyword(title);
-    return { title, description, keyword };
-  }
+    syncFromEditor();
+  };
 
-  function reconstructPdfText(content: { items: any[] }) {
-    const items = content.items
-      .filter((item) => 'str' in item && item.str.trim().length > 0)
-      .map((item) => ({
-        text: item.str as string,
-        x: item.transform?.[4] ?? 0,
-        y: item.transform?.[5] ?? 0,
-        hasEOL: 'hasEOL' in item ? Boolean(item.hasEOL) : false,
-      }));
+  const handleEditorInput = () => {
+    syncFromEditor();
+  };
 
-    if (items.length === 0) return '';
+  const handleEditorPaste = (e: React.ClipboardEvent) => {
+    e.preventDefault();
+    const text = e.clipboardData.getData('text/plain');
+    document.execCommand('insertText', false, text);
+    syncFromEditor();
+  };
 
-    items.sort((a, b) => {
-      const yDiff = b.y - a.y;
-      if (Math.abs(yDiff) > 5) return yDiff;
-      return a.x - b.x;
+  const showIssuePopup = (target: HTMLElement) => {
+    if (target.tagName !== 'MARK' || !target.dataset.issueId) return;
+    const issueId = Number(target.dataset.issueId);
+    const issue =
+      liveReport?.items.find((item) => item.id === issueId) ??
+      aiResults?.find((item) => item.id === issueId);
+    if (!issue) return;
+    const rect = target.getBoundingClientRect();
+    const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+    setHover({
+      x: rect.left - (wrapper?.left || 0) + rect.width / 2,
+      y: rect.bottom - (wrapper?.top || 0) + 8,
+      issue,
     });
+  };
 
-    const lines: string[][] = [];
-    let currentLine: string[] = [];
-    let currentY: number | null = null;
+  const scheduleHide = () => {
+    clearTimeout(hideTimeoutRef.current);
+    hideTimeoutRef.current = setTimeout(() => setHover(null), 300);
+  };
 
-    for (const item of items) {
-      if (currentY === null || Math.abs(item.y - currentY) > 5) {
-        if (currentLine.length > 0) lines.push(currentLine);
-        currentLine = [];
-        currentY = item.y;
-      }
-      currentLine.push(item.text);
+  const handleEditorMouseOver = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (hover && target.closest('.issue-popup')) {
+      clearTimeout(hideTimeoutRef.current);
+      return;
     }
-    if (currentLine.length > 0) lines.push(currentLine);
+    if (target.tagName === 'MARK' && target.dataset.issueId) {
+      clearTimeout(hideTimeoutRef.current);
+      showIssuePopup(target);
+    } else if (hover) {
+      scheduleHide();
+    }
+  };
 
-    return lines
-      .map((line) => line.join(' ').replace(/\s+/g, ' ').trim())
-      .filter((line) => line.length > 0)
-      .join('\n');
-  }
+  const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'MARK' && target.dataset.issueId) {
+      showIssuePopup(target);
+    } else {
+      setHover(null);
+    }
+  };
 
-  const extractTextFromFile = async (file: File): Promise<string> => {
-    const extension = file.name.split('.').pop()?.toLowerCase();
+  const applyHighlights = (reportOverride?: SopReport) => {
+    const editor = editorRef.current;
+    let reportToApply = reportOverride ?? liveReport;
+    if (!editor || !reportToApply) return;
 
-    if (extension === 'txt' || extension === 'md' || extension === 'html' || extension === 'htm') {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result ?? ''));
-        reader.onerror = () => reject(new Error('Gagal membaca file teks.'));
-        reader.readAsText(file);
+    // Always include AI results in highlights if available
+    if (!reportOverride && aiResults) {
+      const failedAi = aiResults.filter(
+        (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0,
+      );
+      if (failedAi.length > 0) {
+        reportToApply = {
+          ...reportToApply,
+          items: [...reportToApply.items, ...failedAi],
+        };
+      }
+    }
+
+    // Save selection as text offset
+    const selection = window.getSelection();
+    let offsetBefore = 0;
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      const preRange = range.cloneRange();
+      preRange.selectNodeContents(editor);
+      preRange.setEnd(range.startContainer, range.startOffset);
+      offsetBefore = preRange.toString().length;
+    }
+
+    const md = htmlToMarkdown(editor.innerHTML);
+    const issues = reportToApply.items.filter(
+      (item) => item.problematic_text?.trim().length > 0,
+    );
+
+    let highlightedMd = md;
+    const ranges: { start: number; end: number; issue: CheckResult }[] = [];
+    for (const issue of issues) {
+      const m = findTextMatch(highlightedMd, issue.problematic_text);
+      if (m) {
+        ranges.push({ start: m.start, end: m.end, issue });
+      }
+    }
+    ranges.sort((a, b) => a.start - b.start);
+
+    let result = '';
+    let lastEnd = 0;
+    for (const range of ranges) {
+      if (range.start < lastEnd) continue;
+      result += highlightedMd.slice(lastEnd, range.start);
+      const safeReason = range.issue.reason.replace(/"/g, '&quot;');
+      const safeLabel = range.issue.question.replace(/"/g, '&quot;');
+      let cls: string;
+      if (range.issue.source === 'ai') {
+        cls = range.issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-ai';
+      } else {
+        cls = range.issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
+      }
+      result += `<mark class="${cls}" data-issue-id="${range.issue.id}" data-reason="${safeReason}" data-label="${safeLabel}">${highlightedMd.slice(
+        range.start,
+        range.end,
+      )}</mark>`;
+      lastEnd = range.end;
+    }
+    result += highlightedMd.slice(lastEnd);
+
+    const newHtml = markdownToHtml(result);
+    setHtmlContent(newHtml);
+    editor.innerHTML = newHtml;
+
+    // Restore selection
+    const restore = findTextNodeAndOffset(editor, offsetBefore);
+    if (restore && selection) {
+      const [node, offset] = restore;
+      const range = document.createRange();
+      range.setStart(node, offset);
+      range.setEnd(node, offset);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  const focusIssue = (issue: CheckResult | null) => {
+    const editor = editorRef.current;
+    if (!editor || !issue?.problematic_text) return;
+
+    // Try to find problematic text in editor content
+    const text = getTextContent(editor.innerHTML);
+    const m = findTextMatch(text, issue.problematic_text);
+
+    if (m) {
+      editor.focus();
+      const start = findTextNodeAndOffset(editor, m.start);
+      const end = findTextNodeAndOffset(editor, m.end);
+      if (start && end) {
+        const range = document.createRange();
+        range.setStart(start[0], start[1]);
+        range.setEnd(end[0], end[1]);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const mark = range.startContainer.parentElement?.closest('mark');
+        if (mark) {
+          mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } else {
+          editor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+    } else {
+      // Fallback: try finding any <mark> with matching data-reason or scroll to editor
+      const marks = editor.querySelectorAll('mark');
+      const match = Array.from(marks).find((m) =>
+        m.getAttribute('data-label')?.includes(issue.question) ||
+        m.getAttribute('data-reason')?.includes(issue.reason.slice(0, 40))
+      );
+      if (match) {
+        match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        window.getSelection()?.removeAllRanges();
+      } else {
+        editor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }
+
+    setFlashText(issue.problematic_text);
+    setTimeout(() => setFlashText(''), 1200);
+    // Position popup near the found text
+    const foundMark = editor.querySelector(`mark[data-issue-id="${issue.id}"]`);
+    if (foundMark) {
+      const rect = foundMark.getBoundingClientRect();
+      const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+      setHover({
+        x: rect.left - (wrapper?.left || 0) + rect.width / 2,
+        y: rect.bottom - (wrapper?.top || 0) + 8,
+        issue,
       });
-    }
-
-    if (extension === 'docx') {
-      const [{ default: mammoth }] = await Promise.all([
-        import('mammoth'),
-      ]);
-      const arrayBuffer = await file.arrayBuffer();
-      const result = await mammoth.extractRawText({ arrayBuffer });
-      return result.value;
-    }
-
-    if (extension === 'pdf') {
-      const [pdfjs, workerUrl] = await Promise.all([
-        import('pdfjs-dist'),
-        import('pdfjs-dist/build/pdf.worker.min.mjs?url').then((m) => m.default),
-      ]);
-      pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
-      const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
-      let text = '';
-      for (let i = 1; i <= pdf.numPages; i += 1) {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        text += reconstructPdfText(content) + '\n';
+    } else if (m) {
+      // Position near the text selection regardless of mark
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0) {
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+        setHover({
+          x: rect.left - (wrapper?.left || 0) + rect.width / 2,
+          y: rect.bottom - (wrapper?.top || 0) + 8,
+          issue,
+        });
+      } else {
+        setHover({ x: editor.clientWidth / 2, y: 100, issue });
       }
-      return text
-        .replace(/\n{3,}/g, '\n\n')
-        .replace(/[ \t]+/g, ' ')
-        .trim();
+    } else {
+      setHover({ x: editor.clientWidth / 2, y: 100, issue });
     }
+    setTimeout(() => setHover(null), 4000);
+  };
 
-    throw new Error('Format file tidak didukung. Gunakan .txt, .md, .docx, atau .pdf');
+  const handleAutoCorrect = async (item: CheckResult) => {
+    pushUndo();
+    setFixingId(item.id);
+    try {
+      const result = await autoReviseItem(
+        { article: stripImages(article), keyword, metaTitle, metaDesc },
+        item,
+        '',
+      );
+      const updatedKeyword = result.keyword || keyword;
+      const updatedTitle = result.metaTitle || metaTitle;
+      const updatedDesc = result.metaDesc || metaDesc;
+      setArticleFromMarkdown(result.article);
+      if (result.keyword) setKeyword(result.keyword);
+      if (result.metaTitle) setMetaTitle(result.metaTitle);
+      if (result.metaDesc) setMetaDesc(result.metaDesc);
+      setHover(null);
+      // Re-check and re-apply highlights immediately with the corrected content
+      const newReport = runSopChecks({
+        article: result.article,
+        keyword: updatedKeyword,
+        metaTitle: updatedTitle,
+        metaDesc: updatedDesc,
+      });
+      setLiveReport(newReport);
+      setReport(newReport);
+      requestAnimationFrame(() => applyHighlights(newReport));
+    } catch {
+      setHover(null);
+    } finally {
+      setFixingId(null);
+    }
+  };
+
+  const handleGenerateKeyword = async () => {
+    setKwGenLoading(true);
+    setKwGenError('');
+    try {
+      const kw = await callOllamaGenerateKeyword(OLLAMA_API_KEY, stripImages(article));
+      if (kw) {
+        setKeyword(kw);
+        setShowKwPopup(false);
+      } else {
+        setKwGenError('Gagal menghasilkan keyword. Coba lagi.');
+      }
+    } catch {
+      setKwGenError('Gagal terhubung ke AI. Pastikan Ollama berjalan.');
+    } finally {
+      setKwGenLoading(false);
+    }
+  };
+
+  const runAnalysis = () => {
+    setIsAnalyzing(true);
+    setAiLoading(true);
+    setAiResults(null);
+    const sopReport = liveReport;
+    window.setTimeout(() => {
+      applyHighlights();
+      setReport(liveReport);
+      setIsAnalyzing(false);
+    }, 300);
+
+    evaluateWithAI(
+      {
+        article: stripImages(article),
+        keyword,
+        metaTitle,
+        metaDesc,
+      },
+      '',
+    )
+      .then((results) => {
+        setAiResults(results);
+        const failedAi = results.filter(
+          (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0,
+        );
+        if (failedAi.length > 0 && sopReport) {
+          applyHighlights({
+            ...sopReport,
+            items: [...sopReport.items, ...failedAi],
+          });
+        }
+      })
+      .catch(() => setAiResults([]))
+      .finally(() => setAiLoading(false));
+  };
+
+  const loadMockArticle = () => {
+    setKeyword('mendaftarkan merek');
+    setMetaTitle('5 Cara Mendaftarkan Merek Usaha Anda | Legalitas');
+    setMetaDesc('Panduan lengkap cara mendaftarkan merek usaha agar tidak dibajak.');
+    setArticleFromMarkdown(`# 5 Cara Melindungi dan Mendaftarkan Merek Usaha
+Pembajakan merek bisa menghancurkan bisnis Anda dalam semalam. Pelajari 5 strategi legal untuk melindungi aset berharga ini sebelum terlambat.
+
+Kasus pencurian identitas brand sedang marak terjadi di kalangan UMKM tahun ini. Anda harus menyadari bahwa tanpa perlindungan hukum, nama bisnis yang Anda bangun bertahun-tahun bisa diklaim oleh kompetitor kapan saja.
+
+Berikut adalah langkah-langkah yang harus Anda lakukan:
+## 1. Lakukan Pengecekan di DJKI
+Sebelum mendaftarkan merek, pastikan nama tersebut belum digunakan. Anda bisa mengeceknya melalui website resmi DJKI.
+
+## 2. Siapkan Persyaratan Dokumen
+Anda membutuhkan KTP, NPWP, dan logo merek yang jelas. Pastikan logo tidak meniru brand terkenal lainnya.
+
+Menurut data Kemenkumham, lebih dari 30% penolakan merek terjadi karena adanya kemiripan visual dengan merek yang sudah terdaftar sebelumnya. Oleh karena itu, orisinalitas sangat penting.
+
+Untuk mendaftarkan merek, pastikan Anda merujuk pada UU No. 20 Tahun 2016 tentang Merek dan Indikasi Geografis. Aturan ini masih berlaku penuh.
+
+Baca juga: [Syarat Merek Terkenal](#), [Pentingnya Legalitas Usaha](#), [Cara Cek Merek Online](#)
+Internal Link: [Layanan Registrasi Merek Kami](#), [Panduan HAKI](#)
+
+Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan dengan tim legal kami hari ini juga!`);
+  };
+
+  const handleReset = () => {
+    setArticle('');
+    setHtmlContent('');
+    setKeyword('');
+    setMetaTitle('');
+    setMetaDesc('');
+    setReport(null);
+    setLiveReport(null);
+    setAiResults(null);
+    setHover(null);
+    setShowResetModal(false);
+    const editor = editorRef.current;
+    if (editor) editor.innerHTML = '';
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
-    setError('');
+    const ext = file.name.split('.').pop()?.toLowerCase();
+
     try {
-      const text = await extractTextFromFile(file);
-      if (!text.trim()) {
-        throw new Error('File kosong atau tidak bisa diekstrak menjadi teks.');
-      }
-      const { title, description, keyword } = extractDocumentMetadata(text);
-      setArticle(text);
-      if (title) setMetaTitle(title);
-      if (description) setMetaDesc(description);
-      if (keyword) setKeyword(keyword);
-      setToastMsg(`Berhasil memuat "${file.name}"`);
-      setTimeout(() => setToastMsg(''), 4000);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Gagal mengunggah file.';
-      setError(message);
-    } finally {
-      setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    }
-  };
+      let text = '';
 
-  const runQualityCheck = async () => {
-    if (!article.trim() || !metaTitle.trim()) {
-      setError('Lengkapi judul dan isi artikel terlebih dahulu.');
-      return;
-    }
+      if (ext === 'pdf') {
+        const buf = await file.arrayBuffer();
+        const pdf = await pdfjs.getDocument({ data: buf }).promise;
+        const pages: string[] = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          const fontSize = 12;
+          const Y_TOL = fontSize * 0.5;
+          const PARA_GAP = fontSize * 1.8;
+          const SPACE_GAP = fontSize * 0.3;
+          const textItems = content.items.filter((it): it is any => 'str' in it);
 
-    setError('');
-    setIsChecking(true);
-    setIsAiEvaluating(false);
-    setReport(null);
-    setActiveTab('qa');
+          const avgHeight = textItems.reduce((s: number, it: any) => s + (it.height || fontSize), 0) / textItems.length;
 
-    window.setTimeout(async () => {
-      try {
-        const ruleReport = runSopChecks({ article, keyword, metaTitle, metaDesc });
+          type Line = { words: { x: number; w: number; t: string }[]; y: number; h: number };
+          const lines: Line[] = [];
+          let cur: Line | null = null;
+          for (const item of textItems) {
+            const y = item.transform[5], x = item.transform[4];
+            const w = item.width || 0, h = item.height || avgHeight || fontSize;
+            if (cur && Math.abs(y - cur.y) <= Y_TOL) {
+              cur.words.push({ x, w, t: item.str });
+              cur.y = y;
+              cur.h = Math.max(cur.h, h);
+            } else {
+              if (cur) lines.push(cur);
+              cur = { words: [{ x, w, t: item.str }], y, h };
+            }
+          }
+          if (cur) lines.push(cur);
 
-        if (apiKey.trim()) {
-          setIsAiEvaluating(true);
-          const aiResults = await evaluateWithAI(
-            { article, keyword, metaTitle, metaDesc },
-            apiKey,
-          );
-          setIsAiEvaluating(false);
-          const combined = calculateSopScore([...ruleReport.items, ...aiResults], ruleReport.wordCount);
-          setReport(combined);
-        } else {
-          setReport(ruleReport);
+          const pageLines: string[] = [];
+          let prevY = -9999;
+          for (const line of lines) {
+            line.words.sort((a, b) => a.x - b.x);
+            const parts: string[] = [];
+            let lx = -9999;
+            for (const w of line.words) {
+              if (lx >= 0 && w.x - lx > SPACE_GAP) parts.push(' ');
+              parts.push(w.t);
+              lx = w.x + w.w;
+            }
+            const raw = parts.join('').trim();
+            if (!raw) continue;
+
+            const gap = line.y - prevY;
+            let prefix = '';
+            if (prevY <= -9990) { prefix = ''; }
+            else if (gap > PARA_GAP) { prefix = '\n\n'; }
+            else { prefix = '\n'; }
+
+            const isHeading = line.h > avgHeight * 1.5 && raw.length < 80;
+            pageLines.push(prefix + (isHeading ? '## ' + raw : raw));
+            prevY = line.y;
+          }
+
+          pages.push(pageLines.join(''));
         }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Gagal memproses artikel.';
-        setError(message);
-      } finally {
-        setIsChecking(false);
-        setIsAiEvaluating(false);
+        text = pages.join('\n\n');
+      } else if (ext === 'docx') {
+        const buf = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer: buf });
+        text = result.value;
+      } else {
+        text = await file.text();
       }
-    }, 280);
+
+      setArticleFromMarkdown(text);
+    } catch (err) {
+      console.error('File upload error:', err);
+      setFlashText('Gagal membaca file: pastikan format file didukung.');
+      setTimeout(() => setFlashText(''), 3000);
+    }
   };
 
-  const handleAutoCorrect = async (item: CheckResult) => {
-    if (item.status === 'deferred') {
-      setToastMsg('Pengecekan regulasi belum tersedia — bagian ini tidak diubah.');
-      setTimeout(() => setToastMsg(''), 4000);
-      return;
-    }
-
-    setCorrectingId(item.id);
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const editor = editorRef.current;
+    if (!editor) return;
     try {
-      const revised = await autoReviseItem({ article, keyword, metaTitle, metaDesc }, item, apiKey);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        editor.focus();
+        document.execCommand('insertHTML', false, `<img src="${dataUrl}" alt="${file.name.replace(/\.[^.]+$/, '')}" style="max-width:100%;border-radius:8px;" />`);
+        syncFromEditor();
+      };
+      reader.readAsDataURL(file);
+    } catch {
+      setFlashText('Gagal membaca gambar.');
+      setTimeout(() => setFlashText(''), 3000);
+    }
+    e.target.value = '';
+  };
 
-      setArticle(revised.article);
-      setMetaTitle(revised.metaTitle);
-      setMetaDesc(revised.metaDesc);
+  const deleteSelectedImg = () => {
+    const img = selectedImgRef.current;
+    if (!img) return;
+    img.remove();
+    selectedImgRef.current = null;
+    setSelectedImgInfo(null);
+    syncFromEditor();
+  };
 
-      const nextReport = runSopChecks({
-        article: revised.article,
-        keyword,
-        metaTitle: revised.metaTitle,
-        metaDesc: revised.metaDesc,
-      });
-      setReport(nextReport);
-
-      setToastMsg(revised.message);
-      setTimeout(() => setToastMsg(''), 5000);
+  const handleChatSend = async () => {
+    const prompt = chatInput.trim();
+    if (!prompt || chatLoading) return;
+    setChatInput('');
+    setChatMessages((prev) => [...prev, { role: 'user', content: prompt }]);
+    setChatLoading(true);
+    try {
+      const result = await callArticleChat(article, prompt);
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: result }]);
+      setArticleFromMarkdown(result);
+      requestAnimationFrame(() => applyHighlights());
     } catch (err) {
-      console.error(err);
-      const message = err instanceof Error ? err.message : 'Gagal memperbaiki otomatis.';
-      alert(message);
+      const msg = err instanceof Error ? err.message : 'Terjadi kesalahan';
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
     } finally {
-      setCorrectingId(null);
+      setChatLoading(false);
     }
-  };
-
-  const renderHighlightedPreview = () => {
-    if (!article) return { __html: '' };
-
-    let htmlText = article
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-
-    if (report?.items) {
-      const failedItems = report.items.filter(
-        (item) => item.status === 'failed' && item.problematic_text,
-      );
-      failedItems.forEach((item) => {
-        const escapedProblem = item.problematic_text
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;');
-        const safeReason = item.reason.replace(/"/g, '&quot;');
-
-        if (escapedProblem.trim().length > 0) {
-          htmlText = htmlText
-            .split(escapedProblem)
-            .join(
-              `<mark class="highlight-mark" data-reason="Perlu diperbaiki: ${safeReason}">${escapedProblem}</mark>`,
-            );
-        }
-      });
-    }
-
-    htmlText = htmlText
-      .replace(/^### (.*$)/gim, '<h3 class="text-lg font-semibold mt-5 mb-2">$1</h3>')
-      .replace(
-        /^## (.*$)/gim,
-        '<h2 class="text-xl font-semibold mt-6 mb-2 border-b border-ink-100 pb-2">$1</h2>',
-      )
-      .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-semibold mt-2 mb-4 text-ink-900">$1</h1>')
-      .replace(/\*\*(.*)\*\*/gim, '<strong>$1</strong>')
-      .replace(/\*(.*)\*/gim, '<em>$1</em>')
-      .replace(/\[(.*?)]\((.*?)\)/gim, '<a href="$2">$1</a>')
-      .replace(/\n/g, '<br/>');
-
-    return { __html: htmlText };
-  };
-
-  const statusIcon = (item: CheckResult) => {
-    if (item.status === 'deferred') {
-      return <MinusCircle className="w-5 h-5 text-ink-700/40" />;
-    }
-    if (item.passed) {
-      return <CheckCircle className="w-5 h-5 text-emerald-600" />;
-    }
-    return <XCircle className="w-5 h-5 text-seal-600" />;
-  };
-
-  const statusPlainLabel = (label: string) => {
-    if (label === 'HIJAU') return 'Lulus';
-    if (label === 'KUNING') return 'Perlu revisi';
-    return 'Belum layak';
   };
 
   return (
-    <div className="min-h-screen font-sans text-ink-900">
-      <header className="sticky top-0 z-20 border-b border-ink-100/80 bg-white/90 backdrop-blur-md">
-        <div className="max-w-screen-2xl mx-auto px-5 sm:px-6 py-4 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="bg-ink-900 p-2.5 rounded-lg shrink-0">
-              <Scale className="w-5 h-5 text-white" />
-            </div>
-            <div className="min-w-0">
-              <p className="font-display text-xl sm:text-2xl font-semibold text-ink-900 tracking-tight truncate">
-                Pemeriksa Artikel
-              </p>
-              <p className="text-xs sm:text-sm text-ink-700/70 truncate">
-                Pemeriksaan mutu konten hukum sesuai SOP internal
-              </p>
-            </div>
+    <div className="min-h-screen bg-white text-slate-800 font-sans antialiased">
+      {/* Header */}
+      <header className="h-14 border-b border-slate-100 flex items-center justify-between px-5 shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="bg-slate-900 text-white p-1.5 rounded-md">
+            <Scale className="w-4 h-4" />
           </div>
-          <div className="hidden sm:flex items-center gap-2 text-ink-700/80 text-sm">
-            <ShieldCheck className="w-4 h-4 text-seal-600" />
-            <span>Berpedoman pada checklist QA SOP</span>
-          </div>
+          <h1 className="text-sm font-semibold text-slate-900 tracking-tight">Article Legal Checker</h1>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-md transition"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            Unggah
+          </button>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            accept=".txt,.md,.pdf,.docx"
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={loadMockArticle}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-md transition"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Contoh
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowResetModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-red-50 hover:text-red-600 rounded-md transition"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Reset
+          </button>
         </div>
       </header>
 
-      <main className="max-w-screen-2xl mx-auto px-5 sm:px-6 py-8 sm:py-10">
-        <section className="mb-8 animate-fade-up">
-          <h1 className="font-display text-3xl sm:text-[2.15rem] font-semibold text-ink-900 leading-tight max-w-2xl">
-            Pastikan artikel hukum Anda mudah dipahami dan siap diterbitkan
-          </h1>
-          <p className="mt-3 text-ink-700/80 max-w-2xl leading-relaxed">
-            Isi kata kunci dan naskah, lalu klik periksa. Sistem akan menandai bagian yang belum
-            sesuai standar penulisan — tanpa istilah teknis yang membingungkan.
-          </p>
+      <main className="flex h-[calc(100vh-3.5rem)]">
+        {/* Editor Area */}
+        <section className="w-[70%] flex flex-col min-w-0 border-r border-slate-100 relative">
+          {/* Meta Header */}
+          <div className="px-10 py-5 border-b border-slate-50 space-y-3">
+            <div className="grid grid-cols-3 gap-4">
+              <div className="col-span-1">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  Keyword
+                </label>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={keyword}
+                    onChange={(e) => setKeyword(e.target.value)}
+                    placeholder="mendaftarkan merek"
+                    className="flex-1 bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm text-slate-700 placeholder:text-slate-300 transition"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowKwPopup(true)}
+                    className="shrink-0 p-1 rounded-md text-slate-300 hover:text-slate-600 hover:bg-slate-100 transition"
+                    title="Generate keyword dengan AI"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="col-span-2">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  Judul
+                </label>
+                <input
+                  type="text"
+                  value={metaTitle}
+                  onChange={(e) => setMetaTitle(e.target.value)}
+                  placeholder="Judul artikel"
+                  className="w-full bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm font-medium text-slate-900 placeholder:text-slate-300 transition"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                Deskripsi
+              </label>
+              <input
+                type="text"
+                value={metaDesc}
+                onChange={(e) => setMetaDesc(e.target.value)}
+                placeholder="Ringkasan singkat artikel"
+                className="w-full bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm text-slate-600 placeholder:text-slate-300 transition"
+              />
+            </div>
+          </div>
 
-          <ol className="mt-5 flex flex-col sm:flex-row sm:flex-wrap gap-3 sm:gap-6 text-sm text-ink-800">
-            <li className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ink-900 text-white text-xs font-bold">
-                1
-              </span>
-              Isi kata kunci &amp; meta
-            </li>
-            <li className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ink-900 text-white text-xs font-bold">
-                2
-              </span>
-              Tulis atau tempel artikel
-            </li>
-            <li className="flex items-center gap-2">
-              <span className="flex h-6 w-6 items-center justify-center rounded-md bg-ink-900 text-white text-xs font-bold">
-                3
-              </span>
-              Periksa &amp; perbaiki
-            </li>
-          </ol>
+          {/* Toolbar */}
+          <div className="px-10 py-2 flex items-center gap-1 border-b border-slate-50">
+            {[
+              { icon: Heading1, action: 'h1', label: 'H1' },
+              { icon: Heading2, action: 'h2', label: 'H2' },
+              { icon: Heading3, action: 'h3', label: 'H3' },
+            ].map((item) => (
+              <button
+                key={item.action}
+                type="button"
+                onClick={() => handleToolbar(item.action)}
+                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                title={item.label}
+              >
+                <item.icon className="w-4 h-4" />
+              </button>
+            ))}
+            <div className="w-px h-4 bg-slate-100 mx-1" />
+            {[
+              { icon: Bold, action: 'bold', label: 'Bold' },
+              { icon: Italic, action: 'italic', label: 'Italic' },
+              { icon: Underline, action: 'underline', label: 'Underline' },
+            ].map((item) => (
+              <button
+                key={item.action}
+                type="button"
+                onClick={() => handleToolbar(item.action)}
+                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                title={item.label}
+              >
+                <item.icon className="w-4 h-4" />
+              </button>
+            ))}
+            <div className="w-px h-4 bg-slate-100 mx-1" />
+            {[
+              { icon: List, action: 'bullet', label: 'Bullet' },
+              { icon: ListOrdered, action: 'number', label: 'Numbering' },
+              { icon: Quote, action: 'quote', label: 'Quote' },
+              { icon: LinkIcon, action: 'link', label: 'Link' },
+              { icon: ImageIcon, action: 'image', label: 'Gambar' },
+            ].map((item) => (
+              <button
+                key={item.action}
+                type="button"
+                onClick={() => {
+                  if (item.action === 'image') {
+                    imageInputRef.current?.click();
+                  } else {
+                    handleToolbar(item.action);
+                  }
+                }}
+                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                title={item.label}
+              >
+                <item.icon className="w-4 h-4" />
+              </button>
+            ))}
+            <input
+              type="file"
+              accept="image/*"
+              ref={imageInputRef}
+              onChange={handleImageUpload}
+              className="hidden"
+            />
+            <div className="flex-1" />
+            <div className="text-xs text-slate-400">{wordCount} kata</div>
+          </div>
+
+          {/* WYSIWYG Editor */}
+          <div
+            ref={editorWrapperRef}
+            className="flex-1 relative overflow-auto px-10 py-8"
+            onClick={(e) => {
+              const target = e.target as HTMLElement;
+              if (!target.closest('mark') && !target.closest('.issue-popup')) {
+                clearTimeout(hideTimeoutRef.current);
+                setHover(null);
+              }
+            }}
+            onMouseOver={handleEditorMouseOver}
+            onMouseLeave={() => { clearTimeout(hideTimeoutRef.current); setHover(null); }}
+          >
+            <div
+              ref={editorRef}
+              contentEditable
+              suppressContentEditableWarning
+              onInput={handleEditorInput}
+              onPaste={handleEditorPaste}
+              onClick={handleEditorClick}
+              className="editor-surface w-full h-full outline-none text-base leading-7 text-slate-800 empty:before:content-[attr(data-placeholder)] empty:before:text-slate-300 empty:before:pointer-events-none"
+              data-placeholder="Mulai menulis artikel Anda di sini..."
+              spellCheck={false}
+            />
+            {flashText && (
+              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                <div className="px-3 py-1.5 bg-slate-900 text-white text-xs rounded-full shadow-lg animate-fade-up">
+                  Fokus: {flashText.slice(0, 40)}...
+                </div>
+              </div>
+            )}
+            {hover && (() => {
+              const passed = hover.issue.status === 'passed';
+              return (
+              <div
+                className="issue-popup absolute z-50 w-72 bg-white border border-slate-100 shadow-xl rounded-xl p-4 animate-fade-up"
+                style={{ left: hover.x, top: hover.y, transform: 'translateX(-50%)' }}
+                onMouseEnter={() => clearTimeout(hideTimeoutRef.current)}
+                onMouseLeave={scheduleHide}
+              >
+                <div className="flex items-start gap-2 mb-2">
+                  {passed
+                    ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" />
+                    : <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
+                  <h4 className="text-sm font-semibold text-slate-900 leading-tight">{hover.issue.question}</h4>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed mb-3">{hover.issue.reason}</p>
+                {!passed && (
+                  <div className="bg-slate-50 rounded-lg p-2.5 text-[11px] text-slate-500">
+                    <div className="font-semibold text-slate-700 mb-1">SOP</div>
+                    {SUGGESTED_LABELS[hover.issue.id] || 'Periksa kembali bagian ini sesuai SOP.'}
+                  </div>
+                )}
+                <div className="mt-3 flex items-center justify-between">
+                  {!passed && (
+                    <button
+                      type="button"
+                      disabled={fixingId === hover.issue.id}
+                      onClick={() => handleAutoCorrect(hover.issue)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-wait transition"
+                    >
+                      {fixingId === hover.issue.id ? 'Memperbaiki...' : 'Auto Correct'}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => focusIssue(hover.issue)}
+                    className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800"
+                  >
+                    Fokus
+                  </button>
+                </div>
+              </div>
+              );
+            })()}
+            {selectedImgInfo && (() => {
+              const align = selectedImgInfo.align;
+              return (
+              <div
+                className="absolute z-50 bg-white border border-slate-100 shadow-xl rounded-xl p-2 animate-fade-up flex items-center gap-1.5"
+                style={{ left: selectedImgInfo.x, top: selectedImgInfo.y, transform: 'translateX(-50%)' }}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                <input
+                  type="range"
+                  min="100"
+                  max="800"
+                  value={selectedImgInfo.width}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value);
+                    setSelectedImgInfo({ ...selectedImgInfo, width: v });
+                    const img = selectedImgRef.current;
+                    if (img) { img.style.width = v + 'px'; syncFromEditor(); }
+                  }}
+                  className="w-20 h-1.5"
+                />
+                <span className="text-[10px] text-slate-400 w-8 text-right">{selectedImgInfo.width}</span>
+                <div className="w-px h-4 bg-slate-100 mx-0.5" />
+                {['inline', 'center', 'right'].map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => {
+                      setSelectedImgInfo({ ...selectedImgInfo, align: a });
+                      const img = selectedImgRef.current;
+                      if (!img) return;
+                      if (a === 'inline') {
+                        img.style.display = '';
+                        img.style.marginLeft = '';
+                        img.style.marginRight = '';
+                      } else if (a === 'center') {
+                        img.style.display = 'block';
+                        img.style.marginLeft = 'auto';
+                        img.style.marginRight = 'auto';
+                      } else {
+                        img.style.display = 'block';
+                        img.style.marginLeft = 'auto';
+                        img.style.marginRight = '0';
+                      }
+                      syncFromEditor();
+                    }}
+                    className={`p-1 rounded text-[10px] font-medium leading-none transition ${align === a ? 'bg-slate-900 text-white' : 'text-slate-400 hover:text-slate-600'}`}
+                    title={a === 'inline' ? 'Inline' : a === 'center' ? 'Tengah' : 'Kanan'}
+                  >
+                    {a === 'inline' ? '≡' : a === 'center' ? '⊞' : '⊟'}
+                  </button>
+                ))}
+                <div className="w-px h-4 bg-slate-100 mx-0.5" />
+                <button
+                  type="button"
+                  onClick={deleteSelectedImg}
+                  className="p-1 rounded text-[10px] font-medium leading-none text-red-400 hover:text-red-600 hover:bg-red-50 transition"
+                  title="Hapus gambar"
+                >
+                  ✕
+                </button>
+              </div>
+              );
+            })()}
+          </div>
+
+          {/* Chatbot */}
+          <div className="absolute bottom-6 right-4 z-[100] flex flex-col items-end gap-3">
+          {chatOpen && (
+            <div ref={chatRef} className="w-80 sm:w-96 h-96 bg-white border border-slate-100 shadow-2xl rounded-2xl flex flex-col overflow-hidden animate-fade-up">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-50 bg-slate-50/50">
+                <span className="text-sm font-semibold text-slate-700">Asisten Artikel</span>
+                <button type="button" onClick={() => setChatOpen(false)} className="text-slate-300 hover:text-slate-500 transition text-lg leading-none">&times;</button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+                {chatMessages.length === 0 && (
+                  <div className="text-slate-400 text-center py-8">
+                    <p className="font-medium text-slate-500 mb-1">Tanya Asisten Artikel</p>
+                    <p className="text-[11px]">Contoh: "perbaiki grammar", "tambah paragraf tentang sanksi hukum", "buat pembukaan lebih profesional"</p>
+                  </div>
+                )}
+                {chatMessages.map((m, i) => (
+                  <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] rounded-xl px-3 py-2 leading-relaxed whitespace-pre-wrap ${m.role === 'user' ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-700'}`}>
+                      {m.role === 'assistant' && !m.content.startsWith('⚠️') ? (
+                        <span>{m.content.length > 200 ? m.content.slice(0, 200) + '...' : m.content}</span>
+                      ) : (
+                        <span>{m.content}</span>
+                      )}
+                      {m.role === 'assistant' && !m.content.startsWith('⚠️') && (
+                        <button
+                          type="button"
+                          onClick={() => setArticleFromMarkdown(m.content)}
+                          className="block mt-1.5 text-[10px] font-medium text-blue-600 hover:text-blue-700"
+                        >
+                          Terapkan ke artikel &rarr;
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {chatLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-slate-50 text-slate-400 rounded-xl px-3 py-2 text-[11px]">Menulis...</div>
+                  </div>
+                )}
+              </div>
+              <div className="border-t border-slate-50 p-3 flex gap-2">
+                <input
+                  type="text"
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChatSend())}
+                  placeholder="Tanya asisten..."
+                  disabled={chatLoading}
+                  className="flex-1 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-xs outline-none focus:border-slate-300 transition placeholder:text-slate-300 disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  onClick={handleChatSend}
+                  disabled={chatLoading || !chatInput.trim()}
+                  className="px-3 py-2 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition shrink-0"
+                >
+                  Kirim
+                </button>
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setChatOpen(!chatOpen)}
+            className="w-11 h-11 bg-slate-900 text-white rounded-full shadow-lg hover:bg-slate-800 transition flex items-center justify-center"
+            title="Buka Asisten Artikel"
+          >
+            <Bot className="w-5 h-5" />
+          </button>
+        </div>
         </section>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 lg:gap-6 items-start">
-          <section className="panel p-5 sm:p-6 lg:h-[42rem] flex flex-col overflow-hidden animate-fade-up" style={{ animationDelay: '60ms' }}>
-            <div className="flex items-start justify-between gap-3 mb-6">
-              <div>
-                <h2 className="font-display text-xl font-semibold flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-seal-600" />
-                  Naskah artikel
-                </h2>
-                <p className="text-sm text-ink-700/70 mt-1">
-                  Gunakan format Markdown sederhana (judul, subjudul, tautan).
-                </p>
-              </div>
-              <button type="button" onClick={loadMockArticle} className="btn-secondary shrink-0">
-                <BookOpen className="w-4 h-4 mr-1.5" />
-                Contoh
-              </button>
-              <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleFileUpload}
-                accept=".txt,.md,.docx,.pdf"
-                className="hidden"
-                aria-label="Unggah dokumen"
-              />
+        {/* Evaluation Panel */}
+        <aside className="w-[30%] min-w-0 bg-slate-50/50 flex flex-col border-l border-slate-100">
+          <div className="p-6 border-b border-slate-100">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-sm font-semibold text-slate-900">Evaluasi Artikel</h2>
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isUploading}
-                className="btn-secondary shrink-0"
+                onClick={runAnalysis}
+                disabled={isAnalyzing || !article.trim()}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
               >
-                {isUploading ? (
+                {isAnalyzing ? (
                   <>
-                    <Loader className="w-4 h-4 mr-1.5 animate-spin" />
-                    Memuat…
+                    <Loader className="w-3.5 h-3.5 animate-spin" /> Memeriksa...
                   </>
                 ) : (
                   <>
-                    <Upload className="w-4 h-4 mr-1.5" />
-                    Unggah
+                    <Target className="w-3.5 h-3.5" /> Periksa
                   </>
                 )}
               </button>
             </div>
 
-            <div className="flex-1 flex flex-col gap-5 overflow-hidden">
-              <div>
-                <label className="field-label" htmlFor="keyword">
-                  Kata kunci utama
-                </label>
-                <input
-                  id="keyword"
-                  type="text"
-                  className="field-input"
-                  placeholder="Contoh: mendaftarkan merek"
-                  value={keyword}
-                  onChange={(e) => setKeyword(e.target.value)}
-                />
-                <p className="field-hint">
-                  Topik utama pencarian yang harus muncul di judul artikel.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="field-label flex justify-between gap-2" htmlFor="metaTitle">
-                    <span>Judul <span className="text-seal-600">*</span></span>
-                    <span
-                      className={`text-xs font-semibold tabular-nums ${metaTitle.length > 60 ? 'text-seal-600' : 'text-ink-700/50'}`}
-                    >
-                      {metaTitle.length}/60
-                    </span>
-                  </label>
-                  <input
-                    id="metaTitle"
-                    type="text"
-                    className="field-input text-sm"
-                    placeholder="Maksimal 60 karakter"
-                    value={metaTitle}
-                    onChange={(e) => setMetaTitle(e.target.value)}
-                  />
-                  <p className="field-hint">Judul yang tampil di hasil pencarian.</p>
+            {!report ? (
+              <div className="text-center py-8 text-slate-400">
+                <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center">
+                  <Target className="w-6 h-6 text-slate-300" />
                 </div>
-                <div>
-                  <label className="field-label flex justify-between gap-2" htmlFor="metaDesc">
-                    <span>Deskripsi</span>
-                    <span
-                      className={`text-xs font-semibold tabular-nums ${metaDesc.length > 160 ? 'text-seal-600' : 'text-ink-700/50'}`}
-                    >
-                      {metaDesc.length}/160
-                    </span>
-                  </label>
-                  <input
-                    id="metaDesc"
-                    type="text"
-                    className="field-input text-sm"
-                    placeholder="Maksimal 160 karakter"
-                    value={metaDesc}
-                    onChange={(e) => setMetaDesc(e.target.value)}
-                  />
-                  <p className="field-hint">Cuplikan singkat yang menarik pembaca.</p>
-                </div>
+                <p className="text-xs">Klik Periksa untuk melihat ringkasan evaluasi.</p>
               </div>
-
-              <div>
-                <label className="field-label" htmlFor="apiKey">API Key Gemini (opsional)</label>
-                <input
-                  id="apiKey"
-                  type="password"
-                  className="field-input text-sm"
-                  placeholder="Isi untuk mengaktifkan evaluasi AI"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-                <p className="field-hint">
-                  AI akan menilai nada bahasa, koherensi, akurasi klaim, dan kualitas CTA.
-                </p>
-              </div>
-
-              <div className="lg:flex-1 lg:flex lg:flex-col lg:min-h-0">
-                <label className="field-label" htmlFor="article">
-                  Isi artikel <span className="text-seal-600">*</span>
-                </label>
-                <div className="border border-ink-100 rounded-lg overflow-hidden focus-within:border-ink-700 focus-within:ring-2 focus-within:ring-ink-700/15 transition bg-white lg:flex-1 lg:flex lg:flex-col lg:min-h-0">
-                  <div className="bg-ink-50 border-b border-ink-100 px-2 py-1.5 flex gap-0.5">
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('# ', '')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Judul"
-                    >
-                      <Heading1 className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('## ', '')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Subjudul"
-                    >
-                      <Heading2 className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('### ', '')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Sub-poin"
-                    >
-                      <Heading3 className="w-4 h-4" />
-                    </button>
-                    <div className="w-px h-5 bg-ink-200 mx-1 my-auto" />
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('**', '**')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Tebal"
-                    >
-                      <Bold className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('*', '*')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Miring"
-                    >
-                      <Italic className="w-4 h-4" />
-                    </button>
-                    <div className="w-px h-5 bg-ink-200 mx-1 my-auto" />
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('- ', '')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Daftar"
-                    >
-                      <List className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('1. ', '')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Daftar bernomor"
-                    >
-                      <ListOrdered className="w-4 h-4" />
-                    </button>
-                    <div className="w-px h-5 bg-ink-200 mx-1 my-auto" />
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('[Teks tautan](', ')')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Tautan"
-                    >
-                      <LinkIcon className="w-4 h-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyFormat('![Teks alt](', ')')}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Gambar"
-                    >
-                      <ImageIcon className="w-4 h-4" />
-                    </button>
-                    <div className="w-px h-5 bg-ink-200 mx-1 my-auto" />
-                    <button
-                      type="button"
-                      onClick={stripMarkdown}
-                      className="p-2 hover:bg-white rounded-md text-ink-800/80 hover:text-ink-900 transition"
-                      title="Hapus format"
-                    >
-                      <Eraser className="w-4 h-4" />
-                    </button>
+            ) : (
+              <>
+                <div className="flex items-center gap-4 mb-5">
+                  <div className="relative w-16 h-16">
+                    <div className={`absolute inset-0 rounded-full ${statusConfig?.bg} ${statusConfig?.border} border-2`} />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <span className={`text-lg font-bold ${statusConfig?.color}`}>{score}</span>
+                    </div>
                   </div>
-                  <textarea
-                    id="article"
-                    ref={textareaRef}
-                    className="w-full p-4 h-72 sm:h-80 lg:h-auto lg:flex-1 lg:min-h-0 outline-none text-sm leading-relaxed resize-none bg-white font-sans"
-                    placeholder={
-                      'Contoh:\n# Judul artikel\nKalimat pembuka singkat...\n\n## 1. Langkah pertama\nPenjelasan prosedur...'
-                    }
-                    value={article}
-                    onChange={(e) => setArticle(e.target.value)}
-                  />
+                  <div className="flex-1">
+                    <div
+                      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${statusConfig?.bg} ${statusConfig?.color} ${statusConfig?.border} border mb-1`}
+                    >
+                      {statusConfig?.label}
+                    </div>
+                    <p className="text-xs text-slate-500">{statusConfig?.desc}</p>
+                  </div>
                 </div>
-                <p className="field-hint">
-                  Target panjang SOP: {TARGET_WORD_MIN.toLocaleString('id-ID')}–
-                  {TARGET_WORD_MAX.toLocaleString('id-ID')} kata.
-                </p>
+
+                <div className="bg-white border border-slate-100 rounded-xl p-4 mb-5">
+                  <h3 className="text-xs font-semibold text-slate-900 mb-1.5">Ringkasan</h3>
+                  <p className="text-xs text-slate-600 leading-relaxed">{generateSummary(report)}</p>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-6">
+            {report && (
+              <div className="space-y-1.5">
+                <h3 className="text-xs font-semibold text-slate-900 mb-3">Daftar Issue</h3>
+                {(() => {
+                  const a: typeof CATEGORIES = [];
+                  const b: typeof CATEGORIES = [];
+                  for (const c of CATEGORIES) {
+                    const i = getCategoryIssue(report, c.id);
+                    if (!i) continue;
+                    if (i.problematic_text?.trim()) a.push(c); else b.push(c);
+                  }
+                  const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
+                    const iss = getCategoryIssue(report, cat.id)!;
+                    const st = getCategoryStatus(report, cat.id);
+                    const I = st === 'passed' ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
+                    const co = st === 'passed' ? 'text-emerald-500' : st === 'deferred' ? 'text-slate-400' : 'text-red-500';
+                    return (
+                      <button key={cat.id} type="button" onClick={() => clickable && focusIssue(iss)} disabled={!clickable}
+                        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition text-left ${clickable ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
+                        <I className={`w-4 h-4 shrink-0 ${co}`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-slate-800">{cat.label}</div>
+                          <div className="text-[10px] text-slate-500 truncate mt-0.5">{iss.reason}</div>
+                        </div>
+                        {clickable && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">Klik</span>}
+                      </button>
+                    );
+                  };
+                  return (
+                    <>
+                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
+                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
+                    </>
+                  );
+                })()}
               </div>
+            )}
 
-              {error && (
-                <div
-                  className="bg-seal-50 text-seal-700 p-3.5 rounded-lg text-sm flex items-start border border-seal-100"
-                  role="alert"
-                >
-                  <AlertTriangle className="w-5 h-5 mr-2.5 shrink-0" />
-                  {error}
-                </div>
-              )}
-
-              <button
-                type="button"
-                onClick={runQualityCheck}
-                disabled={isChecking || correctingId !== null}
-                className="btn-primary"
-              >
-                {isChecking ? (
-                  <>
-                    <Loader className="w-5 h-5 mr-2 animate-spin" />
-                    {isAiEvaluating ? 'AI sedang meninjau…' : 'Sedang memeriksa…'}
-                  </>
-                ) : (
-                  <>
-                    <Send className="w-5 h-5 mr-2" /> Periksa kualitas artikel
-                  </>
+            <div className="mt-8 pt-6 border-t border-slate-100">
+              <h3 className="text-xs font-semibold text-slate-900 mb-3 flex items-center gap-1.5">
+                <BrainCircuit className="w-3.5 h-3.5" /> AI Evaluation
+              </h3>
+              <div className="space-y-1.5">
+                {aiLoading && (
+                  <div className="flex items-center gap-2 p-3 rounded-xl bg-white border border-slate-100">
+                    <Loader className="w-4 h-4 text-slate-400 animate-spin" />
+                    <span className="text-xs text-slate-500">Menganalisis dengan AI...</span>
+                  </div>
                 )}
-              </button>
+                {!aiLoading && aiResults && aiResults.length > 0 && (() => {
+                  const a = aiResults.filter((r) => r.problematic_text?.trim());
+                  const b = aiResults.filter((r) => !r.problematic_text?.trim());
+                  const renderRow = (r: CheckResult, clickable: boolean) => {
+                    const I = r.status === 'passed' ? CheckCircle2 : XCircle;
+                    const co = r.status === 'passed' ? 'text-emerald-500' : 'text-red-500';
+                    return (
+                      <button key={r.id} type="button" onClick={() => clickable && focusIssue(r)} disabled={!clickable}
+                        className={`w-full flex items-start gap-3 p-3 rounded-xl border transition text-left ${clickable ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
+                        <I className={`w-4 h-4 shrink-0 mt-0.5 ${co}`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[11px] font-medium text-slate-800">{r.question}</div>
+                          <div className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">{r.reason}</div>
+                        </div>
+                        {clickable && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-1">Klik</span>}
+                      </button>
+                    );
+                  };
+                  return (
+                    <>
+                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((r) => renderRow(r, true))}</div>}
+                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((r) => renderRow(r, false))}</div>}
+                    </>
+                  );
+                })()}
+                {!aiLoading && (!aiResults || aiResults.length === 0) && (
+                  [
+                    { label: 'AI Summary', icon: Sparkles },
+                    { label: 'AI Grade', icon: Target },
+                    { label: 'AI Suggestions', icon: BrainCircuit },
+                  ].map((item) => (
+                    <div
+                      key={item.label}
+                      className="flex items-center gap-3 p-3 rounded-xl bg-white border border-slate-100 opacity-70"
+                    >
+                      <item.icon className="w-4 h-4 text-slate-400" />
+                      <div className="flex-1">
+                        <div className="text-xs font-medium text-slate-600">{item.label}</div>
+                        <div className="text-[10px] text-slate-400">Coming Soon</div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
-          </section>
-
-          <section
-            className="panel min-h-[32rem] lg:h-[42rem] flex flex-col overflow-hidden animate-fade-up"
-            style={{ animationDelay: '120ms' }}
-          >
-            {!report && !isChecking && (
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-8 sm:p-10">
-                <div className="bg-ink-50 p-4 rounded-xl mb-5">
-                  <CircleHelp className="w-10 h-10 text-ink-700/50" />
-                </div>
-                <h3 className="font-display text-xl font-semibold text-ink-900">
-                  Hasil pemeriksaan akan muncul di sini
-                </h3>
-                <p className="text-sm mt-2 max-w-sm text-ink-700/70 leading-relaxed">
-                  Setelah diperiksa, Anda akan melihat status kelayakan, daftar poin SOP, dan
-                  pratinjau bagian yang perlu diperbaiki.
-                </p>
-              </div>
-            )}
-
-            {isChecking && (
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-10">
-                <div className="relative w-16 h-16 mb-5">
-                  <div className="absolute inset-0 border-[3px] border-ink-100 rounded-full" />
-                  <div className="absolute inset-0 border-[3px] border-ink-900 rounded-full border-t-transparent animate-spin" />
-                </div>
-                <h3 className="font-display text-xl font-semibold text-ink-900">
-                  Memeriksa naskah…
-                </h3>
-                <p className="text-sm text-ink-700/70 mt-2 max-w-xs">
-                  Membandingkan artikel dengan checklist SOP penulisan konten hukum.
-                </p>
-              </div>
-            )}
-
-            {report && !isChecking && (
-              <div className="flex flex-col h-full">
-                <div className="flex border-b border-ink-100 shrink-0 bg-ink-50/60">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('qa')}
-                    className={`flex-1 py-3.5 text-sm font-semibold flex items-center justify-center border-b-2 transition ${
-                      activeTab === 'qa'
-                        ? 'border-ink-900 text-ink-900 bg-white'
-                        : 'border-transparent text-ink-700/60 hover:text-ink-900'
-                    }`}
-                  >
-                    <ListChecks className="w-4 h-4 mr-2" /> Hasil pemeriksaan
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('preview')}
-                    className={`flex-1 py-3.5 text-sm font-semibold flex items-center justify-center border-b-2 transition ${
-                      activeTab === 'preview'
-                        ? 'border-ink-900 text-ink-900 bg-white'
-                        : 'border-transparent text-ink-700/60 hover:text-ink-900'
-                    }`}
-                  >
-                    <Eye className="w-4 h-4 mr-2" /> Pratinjau
-                  </button>
-                </div>
-
-                <div className="flex-grow overflow-y-auto p-5 sm:p-6 custom-scrollbar">
-                  {activeTab === 'preview' && (
-                    <div className="pb-6 animate-fade-up">
-                      <div className="mb-5 p-3.5 bg-ink-900 text-white rounded-lg flex items-start text-sm">
-                        <AlertTriangle className="w-5 h-5 mr-3 shrink-0 text-amber-300 mt-0.5" />
-                        <p className="leading-relaxed">
-                          Bagian yang ditandai perlu diperbaiki agar sesuai SOP. Arahkan kursor ke
-                          teks berwarna untuk melihat alasannya.
-                        </p>
-                      </div>
-                      <div
-                        className="preview-content bg-ink-50 p-5 sm:p-6 rounded-lg border border-ink-100"
-                        dangerouslySetInnerHTML={renderHighlightedPreview()}
-                      />
-                    </div>
-                  )}
-
-                  {activeTab === 'qa' && (
-                    <div className="pb-6 animate-fade-up">
-                      <div
-                        className={`p-5 rounded-xl border mb-5 flex items-center justify-between gap-4 ${report.status.color}`}
-                      >
-                        <div>
-                          <p className="text-xs uppercase tracking-wider font-semibold opacity-70 mb-1">
-                            Status kelayakan
-                          </p>
-                          <h2 className="font-display text-2xl font-semibold">
-                            {statusPlainLabel(report.status.label)}
-                          </h2>
-                          <p className="text-sm font-medium mt-1">{report.status.desc}</p>
-                          <p className="text-xs mt-2 opacity-75 leading-relaxed max-w-sm">
-                            {STATUS_GUIDE[report.status.label]}
-                          </p>
-                          <p className="text-xs mt-2 opacity-70">
-                            Poin belum lulus: {report.failedCount} · Perkiraan kata:{' '}
-                            {report.wordCount.toLocaleString('id-ID')}
-                          </p>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <p className="text-xs font-semibold opacity-70 mb-1">Skor</p>
-                          <div className="font-display text-4xl font-semibold tabular-nums">
-                            {report.score}
-                            <span className="text-lg opacity-50">/{report.scoredTotal}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <p className="text-sm font-semibold text-ink-900 mb-3">
-                        Checklist SOP ({report.items.length} poin)
-                      </p>
-
-                      <div className="space-y-2.5">
-                        {report.items.map((item) => (
-                          <div
-                            key={item.id}
-                            className={`p-4 rounded-lg border ${
-                              item.status === 'deferred'
-                                ? 'bg-ink-50/50 border-dashed border-ink-100'
-                                : item.passed
-                                  ? 'bg-white border-ink-100'
-                                  : 'bg-seal-50/70 border-seal-100'
-                            }`}
-                          >
-                            <div className="flex gap-3 items-start">
-                              <div className="shrink-0 mt-0.5">{statusIcon(item)}</div>
-                              <div className="flex-grow min-w-0">
-                                <div className="flex flex-wrap items-center gap-2">
-                                  <h4
-                                    className={`text-sm font-semibold leading-snug ${
-                                      item.status === 'deferred'
-                                        ? 'text-ink-700/70'
-                                        : item.passed
-                                          ? 'text-ink-900'
-                                          : 'text-seal-700'
-                                    }`}
-                                  >
-                                    {item.id}. {item.question}
-                                  </h4>
-                                  {item.status === 'deferred' && (
-                                    <span className="text-[10px] uppercase tracking-wide font-bold bg-ink-100 text-ink-700/70 px-2 py-0.5 rounded">
-                                      Nanti
-                                    </span>
-                                  )}
-                                  {item.source === 'ai' && (
-                                    <span className="text-[10px] uppercase tracking-wide font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded">
-                                      AI
-                                    </span>
-                                  )}
-                                </div>
-                                <p
-                                  className={`text-sm mt-1 leading-relaxed ${
-                                    item.status === 'deferred'
-                                      ? 'text-ink-700/55'
-                                      : item.passed
-                                        ? 'text-ink-700/75'
-                                        : 'text-seal-700/90'
-                                  }`}
-                                >
-                                  {item.reason}
-                                </p>
-
-                                {item.status === 'failed' && (
-                                  <div className="mt-3 flex flex-wrap gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleAutoCorrect(item)}
-                                      disabled={correctingId !== null}
-                                      className={
-                                        correctingId === item.id
-                                          ? 'btn-fix opacity-70 cursor-wait'
-                                          : 'btn-fix'
-                                      }
-                                    >
-                                      {correctingId === item.id ? (
-                                        <>
-                                          <Loader className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                                          Memperbaiki…
-                                        </>
-                                      ) : (
-                                        <>
-                                          <Sparkles className="w-3.5 h-3.5 mr-1.5" />
-                                          Perbaiki otomatis
-                                        </>
-                                      )}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setActiveTab('preview')}
-                                      className="btn-ghost"
-                                    >
-                                      <Eye className="w-3.5 h-3.5 mr-1.5" /> Lihat di pratinjau
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </section>
-        </div>
+          </div>
+        </aside>
       </main>
 
-      {toastMsg && (
-        <div className="fixed bottom-5 right-5 left-5 sm:left-auto sm:max-w-md bg-ink-900 text-white px-4 py-3 rounded-lg shadow-panel flex items-start z-50 animate-fade-up border border-ink-800">
-          <Check className="w-5 h-5 mr-3 text-emerald-400 shrink-0 mt-0.5" />
-          <p className="text-sm leading-relaxed">{toastMsg}</p>
+      {showKwPopup && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setShowKwPopup(false)}>
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-slate-500" />
+                <span className="text-sm font-semibold text-slate-800">Generate Keyword dengan AI</span>
+              </div>
+              <button type="button" onClick={() => setShowKwPopup(false)} className="text-slate-300 hover:text-slate-500 transition text-lg leading-none">&times;</button>
+            </div>
+            {kwGenError && <div className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{kwGenError}</div>}
+            <p className="text-xs text-slate-500 mb-4 leading-relaxed">AI akan membaca seluruh artikel dan menyarankan 1 keyword utama (2–4 kata) yang paling relevan dengan topik.</p>
+            <button
+              type="button"
+              onClick={handleGenerateKeyword}
+              disabled={kwGenLoading}
+              className="w-full py-2.5 rounded-xl text-sm font-medium text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
+            >
+              {kwGenLoading ? <Loader className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              {kwGenLoading ? 'Menganalisis artikel...' : 'Generate Keyword'}
+            </button>
+          </div>
         </div>
       )}
+
+      {showResetModal && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 px-4" onClick={() => setShowResetModal(false)}>
+          <div
+            className="bg-white rounded-2xl shadow-xl border border-slate-100 w-full max-w-sm p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
+                <RotateCcw className="w-5 h-5 text-red-500" />
+              </div>
+              <h3 className="text-base font-semibold text-slate-900">Reset Artikel</h3>
+            </div>
+            <p className="text-sm text-slate-600 leading-relaxed mb-6">
+              Apakah Anda yakin ingin mereset? Seluruh artikel, metadata, hasil evaluasi, dan riwayat percakapan akan dihapus secara permanen dan tidak dapat dipulihkan.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowResetModal(false)}
+                className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleReset}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition"
+              >
+                Ya, Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes fade-up {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-up {
+          animation: fade-up 0.15s ease-out;
+        }
+        .editor-surface h1,
+        .editor-surface h2,
+        .editor-surface h3,
+        .editor-surface h4,
+        .editor-surface p,
+        .editor-surface ul,
+        .editor-surface ol,
+        .editor-surface blockquote {
+          margin: 0 0 0.75em 0;
+        }
+        .editor-surface h1 { font-size: 1.75rem; font-weight: 700; color: #0f172a; }
+        .editor-surface h2 { font-size: 1.375rem; font-weight: 600; color: #0f172a; }
+        .editor-surface h3 { font-size: 1.125rem; font-weight: 600; color: #0f172a; }
+        .editor-surface strong, .editor-surface b { font-weight: 700; }
+        .editor-surface em, .editor-surface i { font-style: italic; }
+        .editor-surface u { text-decoration: underline; }
+        .editor-surface ul { list-style-type: disc; padding-left: 1.5rem; }
+        .editor-surface ol { list-style-type: decimal; padding-left: 1.5rem; }
+        .editor-surface blockquote { border-left: 3px solid #e2e8f0; padding-left: 1rem; color: #475569; font-style: italic; }
+        .editor-surface a { color: #2563eb; text-decoration: underline; }
+        .editor-surface img { max-width: 100%; border-radius: 0.5rem; margin: 0.5rem 0; }
+        .editor-surface ::selection {
+          background-color: rgba(239, 68, 68, 0.3);
+          color: inherit;
+        }
+        .issue-highlight {
+          background-color: rgba(254, 226, 226, 0.7);
+          border-bottom: 2px solid rgba(239, 68, 68, 0.3);
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight:hover {
+          background-color: rgba(254, 202, 202, 0.9);
+        }
+        .issue-highlight-passed {
+          background-color: rgba(187, 247, 208, 0.5);
+          border-bottom: 2px solid rgba(34, 197, 94, 0.3);
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight-passed:hover {
+          background-color: rgba(134, 239, 172, 0.6);
+        }
+        .issue-highlight-ai {
+          background-color: rgba(254, 243, 199, 0.7);
+          border-bottom: 2px solid rgba(234, 179, 8, 0.4);
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight-ai:hover {
+          background-color: rgba(252, 225, 138, 0.85);
+        }
+      `}</style>
     </div>
   );
 }

@@ -7,13 +7,14 @@ export function calculateSopScore(results: CheckResult[], wordCount: number): So
   const scoredTotal = scored.length;
 
   let status: StatusConfig;
-  if (failedCount === 0) {
+  const pct = scoredTotal > 0 ? (passedCount / scoredTotal) * 100 : 0;
+  if (pct >= 90) {
     status = {
       label: 'HIJAU',
       desc: 'Siap diterbitkan',
       color: 'bg-emerald-50 text-emerald-900 border-emerald-200',
     };
-  } else if (failedCount <= 2) {
+  } else if (pct >= 70) {
     status = {
       label: 'KUNING',
       desc: 'Perlu perbaikan kecil',

@@ -1,5 +1,6 @@
 import type { CheckResult } from './types';
 import { SOP_QUESTIONS } from './constants';
+import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
 
 export interface AiEvaluationInput {
   article: string;
@@ -8,8 +9,9 @@ export interface AiEvaluationInput {
   metaDesc: string;
 }
 
-export async function evaluateWithAI(input: AiEvaluationInput, apiKey: string): Promise<CheckResult[]> {
-  if (!apiKey.trim()) {
+export async function evaluateWithAI(input: AiEvaluationInput, _apiKey: string): Promise<CheckResult[]> {
+  const apiKey = _apiKey.trim() || OLLAMA_API_KEY;
+  if (!apiKey.trim() && !OLLAMA_SKIP_AUTH) {
     return createSkippedResults();
   }
 
@@ -17,7 +19,7 @@ export async function evaluateWithAI(input: AiEvaluationInput, apiKey: string): 
 Tugas Anda mengevaluasi artikel hukum berdasarkan 5 kriteria kualitas berikut. Keluarkan hasil HANYA dalam format JSON.
 
 Kriteria:
-1. Nada bahasa profesional dan sesuai konteks legal (tidak terlalu kasual, tidak terlalu akademik,可信 untuk klien).
+1. Nada bahasa profesional dan sesuai konteks legal (tidak terlalu kasual, tidak terlalu akademik, terpercaya untuk klien).
 2. Alur antar paragraf koheren dan mudah diikuti (ada transisi logis, tidak melompat-lompat).
 3. Klaim hukum akurat dan tidak menyesatkan (tidak membuat klaim absolut jika tidak pasti, tidak mengada-ada).
 4. CTA persuasif dan relevan dengan topik (bukan hanya "hubungi kami" kering).
@@ -38,33 +40,59 @@ Skema JSON:
   ]
 }`;
 
+  const cleanArticle = (input.article || '')
+    .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
+    .replace(/\[[^\]]*\]:\s*\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)/gi, '')
+    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '')
+    .trim();
+
+  // Truncate to first 3000 chars for faster AI processing
+  const truncatedArticle = cleanArticle.length > 3000
+    ? cleanArticle.slice(0, 3000) + '\n\n...[artikel terpotong, lanjutan dihilangkan untuk efisiensi]'
+    : cleanArticle;
+
   const userPrompt = `Keyword: ${input.keyword || '-'}
 Meta Title: ${input.metaTitle || '-'}
 Meta Description: ${input.metaDesc || '-'}
 
 ARTIKEL:
-${input.article}`;
+${truncatedArticle}`;
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: userPrompt }] }],
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          generationConfig: { responseMimeType: 'application/json' },
-        }),
-      },
-    );
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey && !OLLAMA_SKIP_AUTH) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+
+    const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        stream: false,
+        temperature: 0.2,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
 
     if (!response.ok) {
-      throw new Error(`AI request failed: ${response.status}`);
+      const body = await response.text().catch(() => '');
+      throw new Error(`AI request failed: ${response.status}${body ? ` — ${body.slice(0, 200)}` : ''}`);
     }
 
     const data = await response.json();
-    const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const resultText = data.choices?.[0]?.message?.content ?? '';
     const cleaned = resultText.replace(/```json/gi, '').replace(/```/gi, '').trim();
     const parsed = JSON.parse(cleaned);
 
@@ -77,7 +105,7 @@ ${input.article}`;
         question: SOP_QUESTIONS[id],
         status: passed ? 'passed' : ('failed' as CheckResult['status']),
         passed,
-        reason: `${r.reason || '-'} (skor AI: ${score})`,
+        reason: r.reason || '-',
         problematic_text: r.problematic_text || '',
         source: 'ai' as const,
         aiConfidence: score,
@@ -85,7 +113,8 @@ ${input.article}`;
     });
   } catch (err) {
     console.error('AI evaluation error:', err);
-    return createSkippedResults('AI tidak dapat dijalankan saat ini.');
+    const msg = err instanceof Error ? err.message : String(err);
+    return createSkippedResults(`AI error: ${msg}`);
   }
 }
 
@@ -96,7 +125,7 @@ function createSkippedResults(fallbackReason?: string): CheckResult[] {
     question: SOP_QUESTIONS[id],
     status: 'deferred',
     passed: true,
-    reason: fallbackReason || 'Tambahkan API key Gemini untuk mengaktifkan evaluasi AI.',
+    reason: fallbackReason || 'Tambahkan API key Ollama untuk mengaktifkan evaluasi AI.',
     problematic_text: '',
     source: 'ai' as const,
   }));
