@@ -63,7 +63,7 @@ ${truncatedArticle}`;
 
   try {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey && !OLLAMA_SKIP_AUTH) {
+    if (apiKey) {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
 

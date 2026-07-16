@@ -11,7 +11,11 @@ export default async function handler(req, res) {
   const authHeader = clientAuth || (serverApiKey ? `Bearer ${serverApiKey}` : '');
 
   // Extract the path after /ollama (e.g. /ollama/v1/chat/completions -> /v1/chat/completions)
-  const path = (req.url || '').replace(/^\/ollama/, '') || '/v1/chat/completions';
+  const apiPath = req.query?.apiPath || (() => {
+    const u = req.url || '';
+    const m = u.match(/^\/api\/ollama(\/.*?)?(\?|$)/);
+    return m?.[1] || '';
+  })() || '/v1/chat/completions';
   const baseUrl = process.env.VITE_OLLAMA_BASE_URL || 'https://ollama.com';
 
   try {
@@ -28,7 +32,7 @@ export default async function handler(req, res) {
     }
 
     const parsed = body ? JSON.parse(body) : {};
-    const target = `${baseUrl}${path}`;
+    const target = `${baseUrl}${apiPath}`;
     const response = await fetch(target, {
       method: 'POST',
       headers,

@@ -404,7 +404,7 @@ Kembalikan JSON:
   const userPrompt = `Meta Title: ${input.metaTitle}\nMeta Desc: ${input.metaDesc}\nArtikel:\n${cleanArticle}`;
 
   const headers2: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey && !OLLAMA_SKIP_AUTH) {
+  if (apiKey) {
     headers2['Authorization'] = `Bearer ${apiKey}`;
   }
 
@@ -484,7 +484,7 @@ Aturan:
     : clean;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (effectiveApiKey && !OLLAMA_SKIP_AUTH) {
+  if (effectiveApiKey) {
     headers['Authorization'] = `Bearer ${effectiveApiKey}`;
   }
 
