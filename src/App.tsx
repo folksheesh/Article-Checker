@@ -35,6 +35,7 @@ import {
 import { runSopChecks, evaluateWithAI, autoReviseItem, callOllamaGenerateKeyword, type CheckResult, type SopReport } from './sop';
 import { callArticleChat } from './sop/articleChat';
 import { OLLAMA_API_KEY } from './sop/config';
+import { stripImages } from './sop/images';
 
 const CATEGORIES = [
   { id: 'title', label: 'Judul', checks: [1, 2] },
@@ -357,14 +358,6 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
-
-  const stripImages = (text: string) => text
-    .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
-    .replace(/<img\b[^>]*>/gi, '')
-    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
-    .replace(/\[[^\]]*\]:\s*\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)/gi, '')
-    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '')
-    .trim();
 
   const editorRef = useRef<HTMLDivElement>(null);
   const editorWrapperRef = useRef<HTMLDivElement>(null);
@@ -1176,7 +1169,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </div>
       </header>
 
-      <main className="flex flex-col md:flex-row h-[calc(100vh-3.5rem)]">
+      <main className="flex flex-col md:flex-row" style={{ height: 'calc(100dvh - 3.5rem)' }}>
         {/* Editor Area */}
         <section className={`${showMobileEval ? 'hidden' : 'flex'} md:flex w-full md:w-[70%] flex-col min-w-0 border-r border-slate-100 relative`}>
           {/* Meta Header */}
@@ -1322,7 +1315,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           {/* WYSIWYG Editor */}
           <div
             ref={editorWrapperRef}
-            className="flex-1 relative overflow-auto px-4 md:px-10 py-6 md:py-8"
+            data-editor-wrapper
+            className="flex-1 relative overflow-auto min-h-0 px-4 md:px-10 py-6 md:py-8"
             onClick={(e) => {
               const target = e.target as HTMLElement;
               if (target.tagName !== 'IMG' && !target.closest('mark') && !target.closest('.issue-popup')) {
@@ -1584,10 +1578,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               <>
                 <div className="flex items-center gap-4 mb-4">
                   <div className="relative w-16 h-16 shrink-0">
-                    <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
+                    <svg className="w-16 h-16 -rotate-90 score-ring" viewBox="0 0 36 36">
+                      <defs>
+                        <linearGradient id="scoreGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                          <stop offset="0%" stopColor={score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444'} />
+                          <stop offset="100%" stopColor={score >= 80 ? '#16a34a' : score >= 60 ? '#d97706' : '#dc2626'} />
+                        </linearGradient>
+                      </defs>
                       <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e2e8f0" strokeWidth="3" />
                       <circle cx="18" cy="18" r="15.5" fill="none"
-                        stroke={score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444'}
+                        stroke="url(#scoreGrad)"
                         strokeWidth="3" strokeDasharray={`${(score / 100) * 97.39} 97.39`}
                         strokeLinecap="round" />
                     </svg>
@@ -1609,15 +1609,18 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   </div>
                 </div>
 
-                <div className="bg-white border border-slate-100 rounded-xl px-4 py-3">
-                  <h3 className="text-[11px] font-semibold text-slate-900 mb-1">Ringkasan</h3>
+                <div className="bg-gradient-to-br from-slate-50 to-white border border-slate-100 rounded-xl px-4 py-3 shadow-sm">
+                  <h3 className="text-[11px] font-semibold text-slate-900 mb-1 flex items-center gap-1.5">
+                    <span className="w-1 h-3.5 bg-slate-400 rounded-full inline-block" />
+                    Ringkasan
+                  </h3>
                   <p className="text-[11px] text-slate-600 leading-relaxed">{generateSummary(report)}</p>
                 </div>
               </>
             )}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6">
+          <div data-eval-panel className="flex-1 overflow-y-auto min-h-0 p-4 md:p-6 pb-20 md:pb-6">
             {report && (
               <div className="space-y-1.5">
                 <h3 className="text-xs font-semibold text-slate-900 mb-3">Daftar Issue</h3>
@@ -1640,13 +1643,18 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                     const isPassed = st === 'passed';
                     const I = isPassed ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
                     const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-slate-400' : 'text-red-500';
+                    const borderAccent = isPassed ? 'border-l-emerald-300' : st === 'deferred' ? 'border-l-slate-300' : 'border-l-red-300';
+                    // For passed categories, get the first item to show its reason
+                    const itemForReason = iss || report.items.find((item) => cat.checks.includes(item.id));
                     return (
                       <button key={cat.id} type="button" onClick={() => clickable && iss && focusIssue(iss)} disabled={!clickable}
-                        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition text-left ${clickable && !isPassed ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : isPassed ? 'bg-slate-50/40 border-slate-50 cursor-default' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
-                        <I className={`w-4 h-4 shrink-0 ${co}`} />
+                        className={`w-full flex items-center gap-3 p-3 rounded-xl border border-l-2 transition text-left ${borderAccent} ${clickable && !isPassed ? 'bg-white border-slate-100 card-hover cursor-pointer' : isPassed ? 'bg-slate-50/40 border-slate-50 cursor-default' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
+                        <span className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${isPassed ? 'bg-emerald-50' : st === 'deferred' ? 'bg-slate-50' : 'bg-red-50'}`}>
+                          <I className={`w-3.5 h-3.5 ${co}`} />
+                        </span>
                         <div className="flex-1 min-w-0">
                           <div className={`text-xs font-medium ${isPassed ? 'text-slate-600' : 'text-slate-800'}`}>{cat.label}</div>
-                          {iss && <div className="text-[10px] text-slate-500 truncate mt-0.5">{iss.reason}</div>}
+                          {itemForReason && <div className="text-[10px] text-slate-500 leading-relaxed mt-0.5">{itemForReason.reason}</div>}
                         </div>
                         {clickable && !isPassed && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">Klik</span>}
                         {isPassed && <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />}
@@ -1720,7 +1728,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       </div>
                     </div>
                     <div className="space-y-2">
-                      {aiResults.map((r) => {
+                      {aiResults.map((r, idx) => {
                         const score = r.aiConfidence || 0;
                         const passed = r.status === 'passed';
                         const hasText = !!r.problematic_text?.trim();
@@ -1728,28 +1736,31 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         const cardProps = hasText && !passed ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
                         return (
                           <Card key={r.id} {...cardProps}
-                            className={`w-full flex flex-col p-3 rounded-xl border text-left transition ${hasText && !passed ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer group' : 'bg-slate-50/60 border-slate-50'}`}
+                            className={`w-full flex flex-col p-3.5 rounded-xl border text-left transition animate-slide-up eval-card ${hasText && !passed ? 'bg-white border-slate-100 hover:border-slate-200 cursor-pointer group border-l-2 border-l-amber-400' : 'bg-gradient-to-br from-emerald-50/60 to-white border-emerald-100 border-l-2 border-l-emerald-300'}`}
+                            style={{ animationDelay: `${idx * 50}ms` }}
                           >
                             <div className="flex items-start gap-2.5">
-                              {passed ? (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                              ) : (
-                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                              )}
+                              <span className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${passed ? 'bg-emerald-100' : 'bg-amber-100'}`}>
+                                {passed ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                                ) : (
+                                  <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                                )}
+                              </span>
                               <div className="flex-1 min-w-0">
                                 <div className="text-[11px] font-medium text-slate-800 mb-1 leading-snug">{r.question}</div>
-                                <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason}</div>
+                                <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason || '-'}</div>
                                 {hasText && (
-                                  <div className="mt-1.5 text-[10px] text-slate-400 italic bg-slate-50 border border-slate-100 px-2 py-1 rounded">"{r.problematic_text}"</div>
+                                  <div className="mt-1.5 text-[10px] text-slate-400 italic bg-slate-50 border border-slate-100 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
                                 )}
                               </div>
-                              <div className="flex flex-col items-center gap-1 shrink-0">
-                                <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
+                              <div className="flex flex-col items-center gap-1 shrink-0 min-w-[28px]">
+                                <span className={`text-[11px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
                                 {hasText && !passed && <span className="text-[7px] font-medium text-slate-400 bg-slate-100 px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition">Klik</span>}
                               </div>
                             </div>
-                            <div className="mt-2 w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
+                            <div className="mt-2.5 w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full transition-all duration-700 ${passed ? 'bg-gradient-to-r from-emerald-400 to-green-500' : 'bg-gradient-to-r from-amber-400 to-red-400'}`} style={{ width: `${score}%` }} />
                             </div>
                           </Card>
                         );
@@ -1895,12 +1906,26 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .issue-highlight-ai:hover {
           background-color: rgba(252, 225, 138, 0.85);
         }
+        .score-ring { filter: drop-shadow(0 0 4px rgba(34,197,94,0.3)); }
+        .card-hover { transition: all 0.15s ease; }
+        .card-hover:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .eval-card { transition: all 0.2s ease; }
+        .eval-card:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(0,0,0,0.07); }
+        @keyframes slide-up {
+          from { opacity: 0; transform: translateY(8px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-slide-up { animation: slide-up 0.3s ease-out both; }
         @media (max-width: 767px) {
           .editor-surface { font-size: 15px; line-height: 1.7; }
           .editor-surface h1 { font-size: 1.35rem; }
           .editor-surface h2 { font-size: 1.15rem; }
           .editor-surface h3 { font-size: 1rem; }
+          [data-editor-wrapper] { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+          [data-eval-panel] { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
         }
+        [contenteditable] { -webkit-tap-highlight-color: transparent; }
+        [contenteditable]:focus { outline: none; }
       `}</style>
     </div>
   );

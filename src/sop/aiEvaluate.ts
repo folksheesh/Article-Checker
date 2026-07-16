@@ -1,6 +1,7 @@
 import type { CheckResult } from './types';
 import { SOP_QUESTIONS } from './constants';
 import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
+import { stripImages } from './images';
 
 export interface AiEvaluationInput {
   article: string;
@@ -41,13 +42,7 @@ Skema JSON:
   ]
 }`;
 
-  const cleanArticle = (input.article || '')
-    .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
-    .replace(/<img\b[^>]*>/gi, '')
-    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
-    .replace(/\[[^\]]*\]:\s*\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)/gi, '')
-    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '')
-    .trim();
+  const cleanArticle = stripImages(input.article || '');
 
   // Truncate to first 3000 chars for faster AI processing
   const truncatedArticle = cleanArticle.length > 3000

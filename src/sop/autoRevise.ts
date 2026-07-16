@@ -13,6 +13,7 @@ import { countSentences, countWords, parseArticle } from './parser';
 import { runSopChecks } from './sopRules';
 import type { ArticleInput, CheckResult, RuleId } from './types';
 import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
+import { stripImages } from './images';
 
 export interface ReviseResult {
   article: string;
@@ -352,16 +353,6 @@ function applyDeterministicFix(
 
 const OLLAMA_IDS: RuleId[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20];
 
-function stripAllImages(article: string): string {
-  return article
-    .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
-    .replace(/<img\b[^>]*>/gi, '')
-    .replace(/\([^)]*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)(?:\?[^)]*)?\)/gi, '')
-    .replace(/\[[^\]]*\]:\s*\S+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)/gi, '')
-    .replace(/\b\w+\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico)\b/gi, '')
-    .trim();
-}
-
 async function callOllamaRewrite(
   apiKey: string,
   input: ArticleInput,
@@ -400,7 +391,7 @@ Keyword utama: ${input.keyword}
 Kembalikan JSON:
 { "metaTitle": "...", "metaDesc": "...", "article": "..." }`;
 
-  const cleanArticle = stripAllImages(input.article || '');
+  const cleanArticle = stripImages(input.article || '');
   const userPrompt = `Meta Title: ${input.metaTitle}\nMeta Desc: ${input.metaDesc}\nArtikel:\n${cleanArticle}`;
 
   const headers2: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -478,7 +469,7 @@ Aturan:
 - Keyword harus benar-benar muncul atau sangat relevan dengan isi artikel
 - Kembalikan HANYA JSON: { "keyword": "..." }`;
 
-  const clean = stripAllImages(article);
+  const clean = stripImages(article);
   const truncated = clean.length > 3000
     ? clean.slice(0, 3000) + '\n\n...[artikel terpotong]'
     : clean;

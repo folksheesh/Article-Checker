@@ -1,4 +1,5 @@
 import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
+import { stripImages } from './images';
 
 const SYSTEM_PROMPT = `Anda adalah asisten penulis artikel hukum Indonesia. Tugas Anda membantu user menulis dan menyempurnakan artikel mereka.
 
@@ -32,14 +33,14 @@ export async function callArticleChat(
     throw new Error('API key tidak tersedia. Tambahkan VITE_OLLAMA_API_KEY di .env');
   }
 
-  // Extract images into placeholder tokens. The current text model does not
-  // support image input, so we strip the raw image data before sending and
-  // restore it from the original article afterward.
+  // Extract images into placeholder tokens. The current model may not support
+  // image input, so we strip image data before sending and restore it afterward.
   const images: string[] = [];
-  const articleForAi = article.replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => {
+  let articleForAi = article.replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => {
     images.push(m);
     return `[[GAMBAR_${images.length - 1}]]`;
   });
+  articleForAi = stripImages(articleForAi);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) {
