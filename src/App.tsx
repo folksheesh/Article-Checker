@@ -346,6 +346,7 @@ export default function App() {
   const [kwGenLoading, setKwGenLoading] = useState(false);
   const [kwGenError, setKwGenError] = useState('');
   const [showPassedIssues, setShowPassedIssues] = useState(false);
+  const [showMobileEval, setShowMobileEval] = useState(false);
   const selectedImgRef = useRef<HTMLImageElement | null>(null);
   const [selectedImgInfo, setSelectedImgInfo] = useState<{ width: number; align: string; x: number; y: number; maxWidth: number } | null>(null);
   const hoverTargetRef = useRef<HTMLElement | null>(null);
@@ -930,6 +931,7 @@ export default function App() {
     setIsAnalyzing(true);
     setAiLoading(true);
     setAiResults(null);
+    if (window.innerWidth < 768) setShowMobileEval(true);
     const sopReport = liveReport;
     window.setTimeout(() => {
       applyHighlights();
@@ -1174,12 +1176,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </div>
       </header>
 
-      <main className="flex h-[calc(100vh-3.5rem)]">
+      <main className="flex flex-col md:flex-row h-[calc(100vh-3.5rem)]">
         {/* Editor Area */}
-        <section className="w-[70%] flex flex-col min-w-0 border-r border-slate-100 relative">
+        <section className={`${showMobileEval ? 'hidden' : 'flex'} md:flex w-full md:w-[70%] flex-col min-w-0 border-r border-slate-100 relative`}>
           {/* Meta Header */}
-          <div className="px-10 py-5 border-b border-slate-50 space-y-3">
-            <div className="grid grid-cols-3 gap-4">
+          <div className="px-4 md:px-10 py-5 border-b border-slate-50 space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="col-span-1">
                 <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
                   Keyword
@@ -1230,7 +1232,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           </div>
 
           {/* Toolbar */}
-          <div className="px-10 py-2 flex items-center gap-1 border-b border-slate-50">
+          <div className="px-3 md:px-10 py-2 flex flex-wrap items-center gap-0.5 md:gap-1 border-b border-slate-50">
             {[
               { icon: Heading1, action: 'h1', label: 'H1' },
               { icon: Heading2, action: 'h2', label: 'H2' },
@@ -1320,7 +1322,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           {/* WYSIWYG Editor */}
           <div
             ref={editorWrapperRef}
-            className="flex-1 relative overflow-auto px-10 py-8"
+            className="flex-1 relative overflow-auto px-4 md:px-10 py-6 md:py-8"
             onClick={(e) => {
               const target = e.target as HTMLElement;
               if (target.tagName !== 'IMG' && !target.closest('mark') && !target.closest('.issue-popup')) {
@@ -1546,8 +1548,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </section>
 
         {/* Evaluation Panel */}
-        <aside className="w-[30%] min-w-0 bg-slate-50/50 flex flex-col border-l border-slate-100">
-          <div className="p-6 border-b border-slate-100">
+        <aside className={`${showMobileEval ? 'flex' : 'hidden'} md:flex w-full md:w-[30%] min-w-0 bg-slate-50/50 flex-col border-l border-slate-100`}>
+          <div className="p-4 md:p-6 border-b border-slate-100">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-semibold text-slate-900">Evaluasi Artikel</h2>
               <button
@@ -1615,7 +1617,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             )}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6">
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-20 md:pb-6">
             {report && (
               <div className="space-y-1.5">
                 <h3 className="text-xs font-semibold text-slate-900 mb-3">Daftar Issue</h3>
@@ -1697,27 +1699,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               )}
 
               {!aiLoading && aiResults && aiResults.length > 0 && (() => {
-                const withText = aiResults.filter((r) => r.problematic_text?.trim());
-                const withoutText = aiResults.filter((r) => !r.problematic_text?.trim());
                 const avgScore = Math.round(aiResults.reduce((s, r) => s + (r.aiConfidence || 0), 0) / aiResults.length);
                 const passCount = aiResults.filter((r) => r.status === 'passed').length;
-                const renderScoreRow = (r: CheckResult) => {
-                  const score = r.aiConfidence || 0;
-                  const passed = r.status === 'passed';
-                  return (
-                    <div key={r.id} className="flex items-center gap-2.5 p-2.5 rounded-lg bg-white border border-slate-50">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] text-slate-700 leading-tight truncate pr-2">{r.question.slice(0, 60)}...</span>
-                          <span className={`text-[10px] font-semibold shrink-0 ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
-                        </div>
-                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
-                        </div>
-                      </div>
-                    </div>
-                  );
-                };
                 return (
                   <>
                     <div className="flex items-center gap-3 mb-3 px-0.5">
@@ -1736,39 +1719,42 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         {aiResults.length} kriteria
                       </div>
                     </div>
-                    <div className="space-y-1.5 mb-3">
-                      {aiResults.map((r) => renderScoreRow(r))}
-                    </div>
-                    {withText.length > 0 && (
-                      <>
-                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Temuan AI</div>
-                        {withText.map((r) => (
-                          <button key={r.id} type="button" onClick={() => focusIssue(r)}
-                            className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:bg-slate-50 transition text-left cursor-pointer group mb-1"
+                    <div className="space-y-2">
+                      {aiResults.map((r) => {
+                        const score = r.aiConfidence || 0;
+                        const passed = r.status === 'passed';
+                        const hasText = !!r.problematic_text?.trim();
+                        const Card = hasText && !passed ? 'button' : 'div';
+                        const cardProps = hasText && !passed ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
+                        return (
+                          <Card key={r.id} {...cardProps}
+                            className={`w-full flex flex-col p-3 rounded-xl border text-left transition ${hasText && !passed ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer group' : 'bg-slate-50/60 border-slate-50'}`}
                           >
-                            <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[10px] text-slate-600 leading-relaxed line-clamp-2">{r.reason}</div>
-                              <div className="text-[9px] text-slate-400 mt-0.5 truncate">"{r.problematic_text}"</div>
+                            <div className="flex items-start gap-2.5">
+                              {passed ? (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                              )}
+                              <div className="flex-1 min-w-0">
+                                <div className="text-[11px] font-medium text-slate-800 mb-1 leading-snug">{r.question}</div>
+                                <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason}</div>
+                                {hasText && (
+                                  <div className="mt-1.5 text-[10px] text-slate-400 italic bg-slate-50 border border-slate-100 px-2 py-1 rounded">"{r.problematic_text}"</div>
+                                )}
+                              </div>
+                              <div className="flex flex-col items-center gap-1 shrink-0">
+                                <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
+                                {hasText && !passed && <span className="text-[7px] font-medium text-slate-400 bg-slate-100 px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition">Klik</span>}
+                              </div>
                             </div>
-                            <span className="text-[8px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition">Klik</span>
-                          </button>
-                        ))}
-                      </>
-                    )}
-                    {withoutText.length > 0 && (
-                      <>
-                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 mt-3 px-0.5">Lulus</div>
-                        {withoutText.map((r) => (
-                          <div key={r.id} className="flex items-start gap-2.5 p-2.5 rounded-xl border border-transparent bg-slate-50/60">
-                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                            <div className="flex-1 min-w-0">
-                              <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason}</div>
+                            <div className="mt-2 w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
                             </div>
-                          </div>
-                        ))}
-                      </>
-                    )}
+                          </Card>
+                        );
+                      })}
+                    </div>
                   </>
                 );
               })()}
@@ -1811,6 +1797,17 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             })()}
           </div>
         </aside>
+
+        {/* Mobile toggle button */}
+        <button type="button" onClick={() => setShowMobileEval((v) => !v)}
+          className="md:hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-5 py-2.5 bg-slate-900 text-white text-xs font-medium rounded-full shadow-lg hover:bg-slate-800 transition shadow-slate-900/20"
+        >
+          {showMobileEval ? (
+            <><RotateCcw className="w-3.5 h-3.5" /> Kembali ke Editor</>
+          ) : (
+            <><Target className="w-3.5 h-3.5" /> Lihat Evaluasi{report && ` (${report.items.filter((i) => i.status === 'passed').length}/${report.items.length})`}</>
+          )}
+        </button>
       </main>
 
       {showKwPopup && (
@@ -1897,6 +1894,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         }
         .issue-highlight-ai:hover {
           background-color: rgba(252, 225, 138, 0.85);
+        }
+        @media (max-width: 767px) {
+          .editor-surface { font-size: 15px; line-height: 1.7; }
+          .editor-surface h1 { font-size: 1.35rem; }
+          .editor-surface h2 { font-size: 1.15rem; }
+          .editor-surface h3 { font-size: 1rem; }
         }
       `}</style>
     </div>
