@@ -1,15 +1,18 @@
 export default async function handler(req, res) {
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     return res.status(200).end();
   }
 
-  const apiKey = process.env.VITE_OLLAMA_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'OLLAMA_API_KEY not configured on server' });
-  }
+  const serverApiKey = process.env.VITE_OLLAMA_API_KEY;
+  const clientAuth = req.headers.authorization;
+  const authHeader = clientAuth || (serverApiKey ? `Bearer ${serverApiKey}` : '');
+
+  // Extract the path after /ollama (e.g. /ollama/v1/chat/completions -> /v1/chat/completions)
+  const path = (req.url || '').replace(/^\/ollama/, '') || '/v1/chat/completions';
+  const baseUrl = process.env.VITE_OLLAMA_BASE_URL || 'https://ollama.com';
 
   try {
     const body = await new Promise((resolve, reject) => {
@@ -19,19 +22,27 @@ export default async function handler(req, res) {
       req.on('error', reject);
     });
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (authHeader) {
+      headers['Authorization'] = authHeader;
+    }
+
     const parsed = body ? JSON.parse(body) : {};
-    const response = await fetch('https://ollama.com/v1/chat/completions', {
+    const target = `${baseUrl}${path}`;
+    const response = await fetch(target, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers,
       body: JSON.stringify(parsed),
     });
 
-    const data = await response.json();
+    const text = await response.text();
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.status(response.status).json(data);
+    try {
+      const data = JSON.parse(text);
+      res.status(response.status).json(data);
+    } catch {
+      res.status(response.status).send(text);
+    }
   } catch (err) {
     console.error('Ollama proxy error:', err);
     res.status(500).json({ error: 'Internal server error' });
