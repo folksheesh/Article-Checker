@@ -218,7 +218,8 @@ function htmlToMarkdown(html: string): string {
         const src = el.getAttribute('src') || '';
         const alt = el.getAttribute('alt') || '';
         const w = el.getAttribute('width') || el.style.width;
-        return w ? `![${alt}](${src} "${w}")\n` : `![${alt}](${src})\n`;
+        const wNum = w ? String(w).replace('px', '') : '';
+        return wNum ? `![${alt}](${src} "${wNum}")\n` : `![${alt}](${src})\n`;
       case 'mark':
         return children;
       default:
@@ -344,14 +345,17 @@ export default function App() {
   const [showKwPopup, setShowKwPopup] = useState(false);
   const [kwGenLoading, setKwGenLoading] = useState(false);
   const [kwGenError, setKwGenError] = useState('');
+  const [showPassedIssues, setShowPassedIssues] = useState(false);
   const selectedImgRef = useRef<HTMLImageElement | null>(null);
-  const [selectedImgInfo, setSelectedImgInfo] = useState<{ width: number; align: string; x: number; y: number } | null>(null);
+  const [selectedImgInfo, setSelectedImgInfo] = useState<{ width: number; align: string; x: number; y: number; maxWidth: number } | null>(null);
+  const hoverTargetRef = useRef<HTMLElement | null>(null);
+  const hoverRef = useRef<typeof hover>(null);
+  hoverRef.current = hover;
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string }[]>([]);
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string; type?: 'article' | 'answer' }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
-  const [showResetModal, setShowResetModal] = useState(false);
 
   const stripImages = (text: string) => text
     .replace(/!\[[\s\S]*?\]\([\s\S]*?\)/g, '')
@@ -367,25 +371,49 @@ export default function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const undoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
+  const redoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
+  const lastUndoRef = useRef(0);
 
   const pushUndo = () => {
     undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
     if (undoStackRef.current.length > 20) undoStackRef.current.shift();
+    redoStackRef.current = [];
   };
 
   const handleUndo = () => {
-    const state = undoStackRef.current.pop();
-    if (!state) return;
+    const cur = undoStackRef.current.pop();
+    if (!cur) return;
+    redoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
     setHover(null);
-    setKeyword(state.keyword);
-    setMetaTitle(state.metaTitle);
-    setMetaDesc(state.metaDesc);
-    setArticleFromMarkdown(state.article);
+    setKeyword(cur.keyword);
+    setMetaTitle(cur.metaTitle);
+    setMetaDesc(cur.metaDesc);
+    setArticleFromMarkdown(cur.article);
     const restored = runSopChecks({
-      article: state.article,
-      keyword: state.keyword,
-      metaTitle: state.metaTitle,
-      metaDesc: state.metaDesc,
+      article: cur.article,
+      keyword: cur.keyword,
+      metaTitle: cur.metaTitle,
+      metaDesc: cur.metaDesc,
+    });
+    setLiveReport(restored);
+    setReport(restored);
+    requestAnimationFrame(() => applyHighlights(restored));
+  };
+
+  const handleRedo = () => {
+    const cur = redoStackRef.current.pop();
+    if (!cur) return;
+    undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
+    setHover(null);
+    setKeyword(cur.keyword);
+    setMetaTitle(cur.metaTitle);
+    setMetaDesc(cur.metaDesc);
+    setArticleFromMarkdown(cur.article);
+    const restored = runSopChecks({
+      article: cur.article,
+      keyword: cur.keyword,
+      metaTitle: cur.metaTitle,
+      metaDesc: cur.metaDesc,
     });
     setLiveReport(restored);
     setReport(restored);
@@ -393,13 +421,19 @@ export default function App() {
   };
 
   const handleUndoRef = useRef(handleUndo);
+  const handleRedoRef = useRef(handleRedo);
   handleUndoRef.current = handleUndo;
+  handleRedoRef.current = handleRedo;
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
         handleUndoRef.current();
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+        e.preventDefault();
+        handleRedoRef.current();
       }
     };
     document.addEventListener('keydown', onKeyDown);
@@ -409,40 +443,59 @@ export default function App() {
   useEffect(() => {
     const update = () => {
       const editor = editorRef.current;
-      if (!editor) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      if (!editor) return;
       const sel = document.getSelection();
-      if (!sel || sel.rangeCount === 0) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      if (!sel || sel.rangeCount === 0) return;
       let img: HTMLImageElement | null = null;
-      const r = sel.getRangeAt(0);
-      if (r.startContainer === r.endContainer && r.startOffset + 1 === r.endOffset) {
-        const n = r.startContainer.childNodes[r.startOffset];
-        if (n && (n as HTMLElement).tagName === 'IMG') img = n as HTMLImageElement;
-      }
+      let n = sel.anchorNode;
+      if (n && n.nodeType === Node.TEXT_NODE && n.parentElement) n = n.parentElement;
+      if (n && (n as HTMLElement).tagName === 'IMG') img = n as HTMLImageElement;
       if (!img) {
-        let n = sel.anchorNode;
-        if (n && n.nodeType === Node.TEXT_NODE && n.parentElement) n = n.parentElement;
-        if (n && (n as HTMLElement).tagName === 'IMG') img = n as HTMLImageElement;
+        const r = sel.getRangeAt(0);
+        if (r.startContainer === r.endContainer && r.startOffset + 1 === r.endOffset) {
+          const c = r.startContainer.childNodes[r.startOffset];
+          if (c && (c as HTMLElement).tagName === 'IMG') img = c as HTMLImageElement;
+        }
       }
       if (img && editor.contains(img)) {
         selectedImgRef.current = img;
-        const rect = img.getBoundingClientRect();
-        const wr = editor.parentElement!.getBoundingClientRect();
-        setSelectedImgInfo({
-          width: img.width || parseInt(img.style.width) || 300,
-          align: img.style.display === 'block' && img.style.marginLeft === 'auto' && img.style.marginRight === 'auto' ? 'center'
-            : img.style.display === 'block' && img.style.marginLeft === 'auto' ? 'right'
-            : 'inline',
-          x: rect.left - wr.left + rect.width / 2,
-          y: rect.top - wr.top - 44,
-        });
-      } else {
-        selectedImgRef.current = null;
-        setSelectedImgInfo(null);
       }
     };
     document.addEventListener('selectionchange', update);
     document.addEventListener('mouseup', update);
     return () => { document.removeEventListener('selectionchange', update); document.removeEventListener('mouseup', update); };
+  }, []);
+
+  // Scroll listener to reposition the image toolbar
+  useEffect(() => {
+    const el = editorWrapperRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const img = selectedImgRef.current;
+      if (!img || !document.contains(img)) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      const rect = img.getBoundingClientRect();
+      setSelectedImgInfo((prev) => prev ? { ...prev, x: rect.left + rect.width / 2, y: rect.top - 48 } : null);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Scroll listener to reposition the hover popup
+  useEffect(() => {
+    const el = editorWrapperRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const target = hoverTargetRef.current;
+      if (!target || !document.contains(target)) { hoverTargetRef.current = null; return; }
+      const rect = target.getBoundingClientRect();
+      setHover((prev) => {
+        if (!prev) return null;
+        const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
+        return { ...prev, x: rect.left + rect.width / 2, y };
+      });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
   useEffect(() => {
@@ -453,6 +506,16 @@ export default function App() {
     const next = runSopChecks({ article, keyword, metaTitle, metaDesc });
     setLiveReport(next);
   }, [article, keyword, metaTitle, metaDesc]);
+
+  useEffect(() => {
+    if (!article.trim()) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [article]);
 
   const score = useMemo(() => {
     if (!report) return 0;
@@ -473,6 +536,11 @@ export default function App() {
     const html = editor.innerHTML;
     setHtmlContent(html);
     setArticle(htmlToMarkdown(html));
+    const now = Date.now();
+    if (now - lastUndoRef.current > 400) {
+      lastUndoRef.current = now;
+      pushUndo();
+    }
   };
 
   const setEditorHtml = (html: string) => {
@@ -549,18 +617,19 @@ export default function App() {
       liveReport?.items.find((item) => item.id === issueId) ??
       aiResults?.find((item) => item.id === issueId);
     if (!issue) return;
+    hoverTargetRef.current = target;
     const rect = target.getBoundingClientRect();
-    const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+    const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
     setHover({
-      x: rect.left - (wrapper?.left || 0) + rect.width / 2,
-      y: rect.bottom - (wrapper?.top || 0) + 8,
+      x: rect.left + rect.width / 2,
+      y,
       issue,
     });
   };
 
   const scheduleHide = () => {
     clearTimeout(hideTimeoutRef.current);
-    hideTimeoutRef.current = setTimeout(() => setHover(null), 300);
+    hideTimeoutRef.current = setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 300);
   };
 
   const handleEditorMouseOver = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -577,12 +646,38 @@ export default function App() {
     }
   };
 
+  // Native mousedown → image toolbar (more reliable than synthetic onClick)
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const handleNativeClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'IMG') {
+        const img = target as HTMLImageElement;
+        selectedImgRef.current = img;
+        const rect = img.getBoundingClientRect();
+        const wrapper = editorWrapperRef.current;
+        const maxW = wrapper?.clientWidth ?? 800;
+        const y = rect.top - 48 < 10 ? rect.bottom + 10 : rect.top - 48;
+        setSelectedImgInfo({
+          width: Math.round(rect.width),
+          align: img.style.display === 'block' && img.style.marginLeft === 'auto' && img.style.marginRight === 'auto' ? 'center'
+            : img.style.display === 'block' && img.style.marginLeft === 'auto' ? 'right'
+            : 'inline',
+          x: rect.left + rect.width / 2,
+          y,
+          maxWidth: maxW,
+        });
+      }
+    };
+    el.addEventListener('mousedown', handleNativeClick);
+    return () => el.removeEventListener('mousedown', handleNativeClick);
+  }, []);
+
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     if (target.tagName === 'MARK' && target.dataset.issueId) {
       showIssuePopup(target);
-    } else {
-      setHover(null);
     }
   };
 
@@ -591,10 +686,10 @@ export default function App() {
     let reportToApply = reportOverride ?? liveReport;
     if (!editor || !reportToApply) return;
 
-    // Always include AI results in highlights if available
+    // Always include AI results in highlights if available (exclude case issues, id 56)
     if (!reportOverride && aiResults) {
       const failedAi = aiResults.filter(
-        (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0,
+        (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
       );
       if (failedAi.length > 0) {
         reportToApply = {
@@ -711,13 +806,14 @@ export default function App() {
     setFlashText(issue.problematic_text);
     setTimeout(() => setFlashText(''), 1200);
     // Position popup near the found text
-    const foundMark = editor.querySelector(`mark[data-issue-id="${issue.id}"]`);
+    const foundMark = editor.querySelector(`mark[data-issue-id="${issue.id}"]`) as HTMLElement | null;
     if (foundMark) {
+      hoverTargetRef.current = foundMark;
       const rect = foundMark.getBoundingClientRect();
-      const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+      const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
       setHover({
-        x: rect.left - (wrapper?.left || 0) + rect.width / 2,
-        y: rect.bottom - (wrapper?.top || 0) + 8,
+        x: rect.left + rect.width / 2,
+        y,
         issue,
       });
     } else if (m) {
@@ -726,10 +822,10 @@ export default function App() {
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0);
         const rect = range.getBoundingClientRect();
-        const wrapper = editorWrapperRef.current?.getBoundingClientRect();
+        const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
         setHover({
-          x: rect.left - (wrapper?.left || 0) + rect.width / 2,
-          y: rect.bottom - (wrapper?.top || 0) + 8,
+          x: rect.left + rect.width / 2,
+          y,
           issue,
         });
       } else {
@@ -738,7 +834,7 @@ export default function App() {
     } else {
       setHover({ x: editor.clientWidth / 2, y: 100, issue });
     }
-    setTimeout(() => setHover(null), 4000);
+    setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 4000);
   };
 
   const handleAutoCorrect = async (item: CheckResult) => {
@@ -773,6 +869,43 @@ export default function App() {
     } finally {
       setFixingId(null);
     }
+  };
+
+  const handleAutoCorrectCase = (item: CheckResult) => {
+    const text = item.problematic_text;
+    if (!text) return;
+    pushUndo();
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    // Find the text in the markdown article and fix the case
+    const md = htmlToMarkdown(editor.innerHTML);
+    const m = findTextMatch(md, text);
+    if (!m) return;
+
+    const before = md.slice(Math.max(0, m.start - 3), m.start);
+    const isStartOfSentence = m.start === 0 || /[.!?]\s+$/.test(before) || /^\s+$/.test(before) || /^\n+$/.test(before);
+    const isAllUpper = text === text.toUpperCase() && text.length > 1;
+    let corrected: string;
+    if (isStartOfSentence) {
+      corrected = text.charAt(0).toUpperCase() + text.slice(1);
+    } else if (isAllUpper && text.length > 2) {
+      corrected = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+    } else {
+      corrected = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+    }
+    if (corrected === text) {
+      corrected = text.toLowerCase();
+      if (corrected === text) return;
+    }
+
+    const newMd = md.slice(0, m.start) + corrected + md.slice(m.end);
+    setArticleFromMarkdown(newMd);
+    setHover(null);
+    const newReport = runSopChecks({ article: newMd, keyword, metaTitle, metaDesc });
+    setLiveReport(newReport);
+    setReport(newReport);
+    requestAnimationFrame(() => applyHighlights(newReport));
   };
 
   const handleGenerateKeyword = async () => {
@@ -814,9 +947,19 @@ export default function App() {
       '',
     )
       .then((results) => {
+        const allDeferred = results.every((r) => r.status === 'deferred');
+        if (allDeferred && results.length > 0) {
+          const firstReason = results[0].reason || '';
+          if (/image|vision|multimodal/i.test(firstReason)) {
+            setAiResults([]);
+            setFlashText('Model AI tidak mendukung gambar. Gambar telah dihapus dari teks yang dikirim ke AI.');
+            setTimeout(() => setFlashText(''), 4000);
+            return;
+          }
+        }
         setAiResults(results);
         const failedAi = results.filter(
-          (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0,
+          (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
         );
         if (failedAi.length > 0 && sopReport) {
           applyHighlights({
@@ -855,20 +998,6 @@ Internal Link: [Layanan Registrasi Merek Kami](#), [Panduan HAKI](#)
 Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan dengan tim legal kami hari ini juga!`);
   };
 
-  const handleReset = () => {
-    setArticle('');
-    setHtmlContent('');
-    setKeyword('');
-    setMetaTitle('');
-    setMetaDesc('');
-    setReport(null);
-    setLiveReport(null);
-    setAiResults(null);
-    setHover(null);
-    setShowResetModal(false);
-    const editor = editorRef.current;
-    if (editor) editor.innerHTML = '';
-  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -993,9 +1122,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     setChatLoading(true);
     try {
       const result = await callArticleChat(article, prompt);
-      setChatMessages((prev) => [...prev, { role: 'assistant', content: result }]);
-      setArticleFromMarkdown(result);
-      requestAnimationFrame(() => applyHighlights());
+      setChatMessages((prev) => [...prev, { role: 'assistant', content: result.content, type: result.type }]);
+      if (result.type === 'article') {
+        pushUndo();
+        setArticleFromMarkdown(result.content);
+        requestAnimationFrame(() => applyHighlights());
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Terjadi kesalahan';
       setChatMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${msg}` }]);
@@ -1038,14 +1170,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           >
             <BookOpen className="w-3.5 h-3.5" />
             Contoh
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowResetModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-red-50 hover:text-red-600 rounded-md transition"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset
           </button>
         </div>
       </header>
@@ -1170,6 +1294,26 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               className="hidden"
             />
             <div className="flex-1" />
+            <div className="flex items-center gap-0.5 mr-3">
+              <button
+                type="button"
+                onClick={handleUndo}
+                disabled={undoStackRef.current.length === 0}
+                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                title="Undo (Ctrl+Z)"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleRedo}
+                disabled={redoStackRef.current.length === 0}
+                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                title="Redo (Ctrl+Y)"
+              >
+                <RotateCcw className="w-3.5 h-3.5 scale-x-[-1]" />
+              </button>
+            </div>
             <div className="text-xs text-slate-400">{wordCount} kata</div>
           </div>
 
@@ -1179,13 +1323,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             className="flex-1 relative overflow-auto px-10 py-8"
             onClick={(e) => {
               const target = e.target as HTMLElement;
-              if (!target.closest('mark') && !target.closest('.issue-popup')) {
+              if (target.tagName !== 'IMG' && !target.closest('mark') && !target.closest('.issue-popup')) {
                 clearTimeout(hideTimeoutRef.current);
+                hoverTargetRef.current = null;
                 setHover(null);
+                selectedImgRef.current = null;
+                setSelectedImgInfo(null);
               }
             }}
             onMouseOver={handleEditorMouseOver}
-            onMouseLeave={() => { clearTimeout(hideTimeoutRef.current); setHover(null); }}
+            onMouseLeave={() => { clearTimeout(hideTimeoutRef.current); hoverTargetRef.current = null; setHover(null); }}
           >
             <div
               ref={editorRef}
@@ -1209,7 +1356,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               const passed = hover.issue.status === 'passed';
               return (
               <div
-                className="issue-popup absolute z-50 w-72 bg-white border border-slate-100 shadow-xl rounded-xl p-4 animate-fade-up"
+                className="issue-popup fixed z-[100] w-72 bg-white border border-slate-100 shadow-xl rounded-xl p-4 animate-fade-up"
                 style={{ left: hover.x, top: hover.y, transform: 'translateX(-50%)' }}
                 onMouseEnter={() => clearTimeout(hideTimeoutRef.current)}
                 onMouseLeave={scheduleHide}
@@ -1228,7 +1375,15 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   </div>
                 )}
                 <div className="mt-3 flex items-center justify-between">
-                  {!passed && (
+                  {!passed && hover.issue.id === 56 ? (
+                    <button
+                      type="button"
+                      onClick={() => handleAutoCorrectCase(hover.issue)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-wait transition"
+                    >
+                      Auto Correct
+                    </button>
+                  ) : !passed && (
                     <button
                       type="button"
                       disabled={fixingId === hover.issue.id}
@@ -1253,20 +1408,20 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               const align = selectedImgInfo.align;
               return (
               <div
-                className="absolute z-50 bg-white border border-slate-100 shadow-xl rounded-xl p-2 animate-fade-up flex items-center gap-1.5"
+                className="fixed z-[100] bg-white border border-slate-100 shadow-xl rounded-xl p-2 animate-fade-up flex items-center gap-1.5"
                 style={{ left: selectedImgInfo.x, top: selectedImgInfo.y, transform: 'translateX(-50%)' }}
                 onMouseDown={(e) => e.preventDefault()}
               >
                 <input
                   type="range"
                   min="100"
-                  max="800"
+                  max={selectedImgInfo.maxWidth}
                   value={selectedImgInfo.width}
                   onChange={(e) => {
                     const v = parseInt(e.target.value);
                     setSelectedImgInfo({ ...selectedImgInfo, width: v });
                     const img = selectedImgRef.current;
-                    if (img) { img.style.width = v + 'px'; syncFromEditor(); }
+                    if (img) { img.style.width = Math.min(v, selectedImgInfo.maxWidth) + 'px'; syncFromEditor(); }
                   }}
                   className="w-20 h-1.5"
                 />
@@ -1334,18 +1489,20 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                     <div className={`max-w-[85%] rounded-xl px-3 py-2 leading-relaxed whitespace-pre-wrap ${m.role === 'user' ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-700'}`}>
                       {m.role === 'assistant' && !m.content.startsWith('⚠️') ? (
-                        <span>{m.content.length > 200 ? m.content.slice(0, 200) + '...' : m.content}</span>
+                        <div>
+                          <span className="line-clamp-6">{m.content}</span>
+                          {m.type === 'article' && (
+                            <button
+                              type="button"
+                              onClick={() => setArticleFromMarkdown(m.content)}
+                              className="block mt-1.5 text-[10px] font-medium text-blue-600 hover:text-blue-700"
+                            >
+                              Terapkan ke artikel &rarr;
+                            </button>
+                          )}
+                        </div>
                       ) : (
                         <span>{m.content}</span>
-                      )}
-                      {m.role === 'assistant' && !m.content.startsWith('⚠️') && (
-                        <button
-                          type="button"
-                          onClick={() => setArticleFromMarkdown(m.content)}
-                          className="block mt-1.5 text-[10px] font-medium text-blue-600 hover:text-blue-700"
-                        >
-                          Terapkan ke artikel &rarr;
-                        </button>
                       )}
                     </div>
                   </div>
@@ -1412,34 +1569,47 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             </div>
 
             {!report ? (
-              <div className="text-center py-8 text-slate-400">
-                <div className="w-16 h-16 mx-auto mb-3 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Target className="w-6 h-6 text-slate-300" />
+              <div className="text-center py-10 text-slate-400">
+                <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-slate-100 flex items-center justify-center">
+                  <Scale className="w-10 h-10 text-slate-300" />
                 </div>
-                <p className="text-xs">Klik Periksa untuk melihat ringkasan evaluasi.</p>
+                <p className="text-sm font-medium text-slate-500 mb-1">Belum ada evaluasi</p>
+                <p className="text-xs text-slate-400 max-w-48 mx-auto leading-relaxed">
+                  Klik tombol <strong className="text-slate-500">Periksa</strong> untuk menjalankan SOP check dan evaluasi AI pada artikel Anda.
+                </p>
               </div>
             ) : (
               <>
-                <div className="flex items-center gap-4 mb-5">
-                  <div className="relative w-16 h-16">
-                    <div className={`absolute inset-0 rounded-full ${statusConfig?.bg} ${statusConfig?.border} border-2`} />
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <span className={`text-lg font-bold ${statusConfig?.color}`}>{score}</span>
-                    </div>
+                <div className="flex items-center gap-4 mb-4">
+                  <div className="relative w-16 h-16 shrink-0">
+                    <svg className="w-16 h-16 -rotate-90" viewBox="0 0 36 36">
+                      <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e2e8f0" strokeWidth="3" />
+                      <circle cx="18" cy="18" r="15.5" fill="none"
+                        stroke={score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444'}
+                        strokeWidth="3" strokeDasharray={`${(score / 100) * 97.39} 97.39`}
+                        strokeLinecap="round" />
+                    </svg>
+                    <span className={`absolute inset-0 flex items-center justify-center text-sm font-bold ${statusConfig?.color}`}>{score}</span>
                   </div>
-                  <div className="flex-1">
-                    <div
-                      className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${statusConfig?.bg} ${statusConfig?.color} ${statusConfig?.border} border mb-1`}
-                    >
+                  <div className="flex-1 min-w-0">
+                    <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusConfig?.bg} ${statusConfig?.color} ${statusConfig?.border} border mb-1`}>
+                      {statusConfig?.label === 'Layak Publish' ? (
+                        <CheckCircle2 className="w-3 h-3" />
+                      ) : (
+                        <AlertCircle className="w-3 h-3" />
+                      )}
                       {statusConfig?.label}
                     </div>
-                    <p className="text-xs text-slate-500">{statusConfig?.desc}</p>
+                    <p className="text-[11px] text-slate-500 leading-snug">{statusConfig?.desc}</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">
+                      {report.items.filter((i) => i.status === 'passed').length}/{report.items.length} kriteria lulus
+                    </p>
                   </div>
                 </div>
 
-                <div className="bg-white border border-slate-100 rounded-xl p-4 mb-5">
-                  <h3 className="text-xs font-semibold text-slate-900 mb-1.5">Ringkasan</h3>
-                  <p className="text-xs text-slate-600 leading-relaxed">{generateSummary(report)}</p>
+                <div className="bg-white border border-slate-100 rounded-xl px-4 py-3">
+                  <h3 className="text-[11px] font-semibold text-slate-900 mb-1">Ringkasan</h3>
+                  <p className="text-[11px] text-slate-600 leading-relaxed">{generateSummary(report)}</p>
                 </div>
               </>
             )}
@@ -1452,25 +1622,32 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 {(() => {
                   const a: typeof CATEGORIES = [];
                   const b: typeof CATEGORIES = [];
-                  for (const c of CATEGORIES) {
-                    const i = getCategoryIssue(report, c.id);
-                    if (!i) continue;
-                    if (i.problematic_text?.trim()) a.push(c); else b.push(c);
+                  const c: typeof CATEGORIES = [];
+                  for (const cat of CATEGORIES) {
+                    const i = getCategoryIssue(report, cat.id);
+                    const st = getCategoryStatus(report, cat.id);
+                    if (st !== 'passed' && i) {
+                      if (i.problematic_text?.trim()) a.push(cat); else b.push(cat);
+                    } else {
+                      c.push(cat);
+                    }
                   }
                   const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
-                    const iss = getCategoryIssue(report, cat.id)!;
+                    const iss = getCategoryIssue(report, cat.id);
                     const st = getCategoryStatus(report, cat.id);
-                    const I = st === 'passed' ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
-                    const co = st === 'passed' ? 'text-emerald-500' : st === 'deferred' ? 'text-slate-400' : 'text-red-500';
+                    const isPassed = st === 'passed';
+                    const I = isPassed ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
+                    const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-slate-400' : 'text-red-500';
                     return (
-                      <button key={cat.id} type="button" onClick={() => clickable && focusIssue(iss)} disabled={!clickable}
-                        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition text-left ${clickable ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
+                      <button key={cat.id} type="button" onClick={() => clickable && iss && focusIssue(iss)} disabled={!clickable}
+                        className={`w-full flex items-center gap-3 p-3 rounded-xl border transition text-left ${clickable && !isPassed ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : isPassed ? 'bg-slate-50/40 border-slate-50 cursor-default' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
                         <I className={`w-4 h-4 shrink-0 ${co}`} />
                         <div className="flex-1 min-w-0">
-                          <div className="text-xs font-medium text-slate-800">{cat.label}</div>
-                          <div className="text-[10px] text-slate-500 truncate mt-0.5">{iss.reason}</div>
+                          <div className={`text-xs font-medium ${isPassed ? 'text-slate-600' : 'text-slate-800'}`}>{cat.label}</div>
+                          {iss && <div className="text-[10px] text-slate-500 truncate mt-0.5">{iss.reason}</div>}
                         </div>
-                        {clickable && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">Klik</span>}
+                        {clickable && !isPassed && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">Klik</span>}
+                        {isPassed && <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />}
                       </button>
                     );
                   };
@@ -1478,68 +1655,160 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                     <>
                       {a.length > 0 && <div><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
                       {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
+                      {c.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-slate-50">
+                          <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
+                            className="flex items-center gap-2 text-[10px] font-medium text-slate-400 hover:text-slate-600 transition px-0.5"
+                          >
+                            <span className={`inline-block transition-transform ${showPassedIssues ? 'rotate-90' : ''}`}>▶</span>
+                            {showPassedIssues ? 'Sembunyikan' : 'Lihat'}{' '}
+                            <span className="text-slate-400">{c.length} kategori lulus</span>
+                          </button>
+                          {showPassedIssues && (
+                            <div className="mt-1.5 space-y-1">
+                              {c.map((cat) => renderRow(cat, false))}
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </>
                   );
                 })()}
               </div>
             )}
 
-            <div className="mt-8 pt-6 border-t border-slate-100">
+            <div className="mt-6 pt-5 border-t border-slate-100">
               <h3 className="text-xs font-semibold text-slate-900 mb-3 flex items-center gap-1.5">
-                <BrainCircuit className="w-3.5 h-3.5" /> AI Evaluation
+                <BrainCircuit className="w-3.5 h-3.5 text-slate-600" /> AI Evaluation
               </h3>
-              <div className="space-y-1.5">
-                {aiLoading && (
-                  <div className="flex items-center gap-2 p-3 rounded-xl bg-white border border-slate-100">
-                    <Loader className="w-4 h-4 text-slate-400 animate-spin" />
-                    <span className="text-xs text-slate-500">Menganalisis dengan AI...</span>
-                  </div>
-                )}
-                {!aiLoading && aiResults && aiResults.length > 0 && (() => {
-                  const a = aiResults.filter((r) => r.problematic_text?.trim());
-                  const b = aiResults.filter((r) => !r.problematic_text?.trim());
-                  const renderRow = (r: CheckResult, clickable: boolean) => {
-                    const I = r.status === 'passed' ? CheckCircle2 : XCircle;
-                    const co = r.status === 'passed' ? 'text-emerald-500' : 'text-red-500';
-                    return (
-                      <button key={r.id} type="button" onClick={() => clickable && focusIssue(r)} disabled={!clickable}
-                        className={`w-full flex items-start gap-3 p-3 rounded-xl border transition text-left ${clickable ? 'bg-white border-slate-100 hover:border-slate-200 hover:bg-slate-50 cursor-pointer' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
-                        <I className={`w-4 h-4 shrink-0 mt-0.5 ${co}`} />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-[11px] font-medium text-slate-800">{r.question}</div>
-                          <div className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">{r.reason}</div>
-                        </div>
-                        {clickable && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-1">Klik</span>}
-                      </button>
-                    );
-                  };
+
+              {aiLoading && (
+                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-white border border-slate-100">
+                  <Loader className="w-4 h-4 text-slate-400 animate-spin" />
+                  <span className="text-xs text-slate-500">Menganalisis artikel dengan AI...</span>
+                </div>
+              )}
+
+              {!aiLoading && !aiResults && !report && (
+                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-white border border-slate-100 opacity-70">
+                  <BrainCircuit className="w-4 h-4 text-slate-400" />
+                  <span className="text-xs text-slate-400">Klik <strong>Periksa</strong> untuk evaluasi AI</span>
+                </div>
+              )}
+
+              {!aiLoading && aiResults && aiResults.length > 0 && (() => {
+                const withText = aiResults.filter((r) => r.problematic_text?.trim());
+                const withoutText = aiResults.filter((r) => !r.problematic_text?.trim());
+                const avgScore = Math.round(aiResults.reduce((s, r) => s + (r.aiConfidence || 0), 0) / aiResults.length);
+                const passCount = aiResults.filter((r) => r.status === 'passed').length;
+                const renderScoreRow = (r: CheckResult) => {
+                  const score = r.aiConfidence || 0;
+                  const passed = r.status === 'passed';
                   return (
-                    <>
-                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((r) => renderRow(r, true))}</div>}
-                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((r) => renderRow(r, false))}</div>}
-                    </>
-                  );
-                })()}
-                {!aiLoading && (!aiResults || aiResults.length === 0) && (
-                  [
-                    { label: 'AI Summary', icon: Sparkles },
-                    { label: 'AI Grade', icon: Target },
-                    { label: 'AI Suggestions', icon: BrainCircuit },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      className="flex items-center gap-3 p-3 rounded-xl bg-white border border-slate-100 opacity-70"
-                    >
-                      <item.icon className="w-4 h-4 text-slate-400" />
-                      <div className="flex-1">
-                        <div className="text-xs font-medium text-slate-600">{item.label}</div>
-                        <div className="text-[10px] text-slate-400">Coming Soon</div>
+                    <div key={r.id} className="flex items-center gap-2.5 p-2.5 rounded-lg bg-white border border-slate-50">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-slate-700 leading-tight truncate pr-2">{r.question.slice(0, 60)}...</span>
+                          <span className={`text-[10px] font-semibold shrink-0 ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
+                        </div>
                       </div>
                     </div>
-                  ))
-                )}
-              </div>
+                  );
+                };
+                return (
+                  <>
+                    <div className="flex items-center gap-3 mb-3 px-0.5">
+                      <div className="flex items-center gap-1.5 text-[11px] text-emerald-600 font-medium">
+                        <CheckCircle2 className="w-3 h-3" />
+                        {passCount} lulus
+                      </div>
+                      <span className="text-slate-300">|</span>
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                        <BrainCircuit className="w-3 h-3" />
+                        Skor {avgScore}
+                      </div>
+                      <span className="text-slate-300">|</span>
+                      <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
+                        <Target className="w-3 h-3" />
+                        {aiResults.length} kriteria
+                      </div>
+                    </div>
+                    <div className="space-y-1.5 mb-3">
+                      {aiResults.map((r) => renderScoreRow(r))}
+                    </div>
+                    {withText.length > 0 && (
+                      <>
+                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Temuan AI</div>
+                        {withText.map((r) => (
+                          <button key={r.id} type="button" onClick={() => focusIssue(r)}
+                            className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:bg-slate-50 transition text-left cursor-pointer group mb-1"
+                          >
+                            <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] text-slate-600 leading-relaxed line-clamp-2">{r.reason}</div>
+                              <div className="text-[9px] text-slate-400 mt-0.5 truncate">"{r.problematic_text}"</div>
+                            </div>
+                            <span className="text-[8px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition">Klik</span>
+                          </button>
+                        ))}
+                      </>
+                    )}
+                    {withoutText.length > 0 && (
+                      <>
+                        <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 mt-3 px-0.5">Lulus</div>
+                        {withoutText.map((r) => (
+                          <div key={r.id} className="flex items-start gap-2.5 p-2.5 rounded-xl border border-transparent bg-slate-50/60">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
+
+              {!aiLoading && aiResults && aiResults.length === 0 && (
+                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-100">
+                  <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span className="text-[11px] text-amber-700 leading-relaxed">Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.</span>
+                </div>
+              )}
             </div>
+
+            {aiResults && (() => {
+              const caseIssues = aiResults.filter((r) => r.id === 56 && r.status === 'failed' && r.problematic_text?.trim());
+              if (caseIssues.length === 0) return null;
+              return (
+              <div className="mt-5 pt-4 border-t border-slate-100">
+                <h3 className="text-xs font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold tracking-tight text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">Aa</span> Rekomendasi Kapitalisasi
+                </h3>
+                <div className="text-[10px] text-slate-400 mb-3 leading-relaxed">
+                  Klik item untuk lokasi kata. Klik <strong>Auto Correct</strong> di popup untuk perbaiki kapitalisasi.
+                </div>
+                <div className="space-y-1">
+                  {caseIssues.map((r, i) => (
+                    <button key={i} type="button" onClick={() => focusIssue(r)}
+                      className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:bg-slate-50 transition text-left cursor-pointer group"
+                    >
+                      <span className="text-[9px] font-bold text-slate-400 mt-0.5 shrink-0 w-4 text-center">Aa</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] text-slate-700 font-medium leading-snug">{r.reason}</div>
+                        <div className="text-[10px] text-slate-400 mt-0.5 italic truncate">"{r.problematic_text}"</div>
+                      </div>
+                      <span className="text-[8px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition">Klik</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              );
+            })()}
           </div>
         </aside>
       </main>
@@ -1565,41 +1834,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               {kwGenLoading ? <Loader className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
               {kwGenLoading ? 'Menganalisis artikel...' : 'Generate Keyword'}
             </button>
-          </div>
-        </div>
-      )}
-
-      {showResetModal && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/30 px-4" onClick={() => setShowResetModal(false)}>
-          <div
-            className="bg-white rounded-2xl shadow-xl border border-slate-100 w-full max-w-sm p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center shrink-0">
-                <RotateCcw className="w-5 h-5 text-red-500" />
-              </div>
-              <h3 className="text-base font-semibold text-slate-900">Reset Artikel</h3>
-            </div>
-            <p className="text-sm text-slate-600 leading-relaxed mb-6">
-              Apakah Anda yakin ingin mereset? Seluruh artikel, metadata, hasil evaluasi, dan riwayat percakapan akan dihapus secara permanen dan tidak dapat dipulihkan.
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowResetModal(false)}
-                className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 rounded-lg transition"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                onClick={handleReset}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition"
-              >
-                Ya, Reset
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -1632,7 +1866,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .editor-surface ol { list-style-type: decimal; padding-left: 1.5rem; }
         .editor-surface blockquote { border-left: 3px solid #e2e8f0; padding-left: 1rem; color: #475569; font-style: italic; }
         .editor-surface a { color: #2563eb; text-decoration: underline; }
-        .editor-surface img { max-width: 100%; border-radius: 0.5rem; margin: 0.5rem 0; }
+        .editor-surface img { max-width: 100%; border-radius: 0.5rem; }
         .editor-surface ::selection {
           background-color: rgba(239, 68, 68, 0.3);
           color: inherit;

@@ -1,23 +1,32 @@
 import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
 
-const SYSTEM_PROMPT = `Anda adalah asisten penulis artikel hukum Indonesia. Tugas Anda membantu user menyempurnakan artikel mereka.
+const SYSTEM_PROMPT = `Anda adalah asisten penulis artikel hukum Indonesia. Tugas Anda membantu user menulis dan menyempurnakan artikel mereka.
 
-Anda akan menerima artikel saat ini dan permintaan user. Balaslah dengan versi artikel yang sudah dimodifikasi sesuai permintaan user.
+Anda akan menerima artikel saat ini dan pesan dari user.
+
+Ada dua jenis permintaan user:
+
+1. **Permintaan mengubah artikel** — jika user meminta perubahan pada artikel (perbaiki, tambah, hapus, ubah, dll.), maka Anda harus mengembalikan SELURUH artikel yang sudah dimodifikasi dalam format Markdown. Awali respons Anda dengan: [ARTICLE]
+
+2. **Pertanyaan tentang artikel** — jika user bertanya tentang artikel (saran, pendapat, analisis, evaluasi, dll.), maka Anda harus menjawab secara naratif seperti rekan diskusi. Awali respons Anda dengan: [ANSWER]
 
 Aturan:
-- Output HANYA teks artikel yang sudah dimodifikasi (dalam format Markdown)
-- Jangan tambahkan penjelasan, komentar, atau catatan tambahan
-- Jangan gunakan pembuka seperti "Tentu, berikut artikel yang sudah diperbaiki"
-- Pertahankan struktur Markdown asli artikel
-- Jangan mengubah bagian yang tidak diminta
+- Jika user meminta perubahan, output HANYA teks artikel yang sudah dimodifikasi setelah tag [ARTICLE], tanpa penjelasan tambahan
+- Jika user bertanya, berikan jawaban yang informatif dan profesional setelah tag [ANSWER], gunakan bahasa Indonesia
+- Pertahankan struktur Markdown asli artikel saat memodifikasi
+- Jangan mengubah bagian artikel yang tidak diminta
 - Jika user meminta sesuatu di luar konteks artikel, tolak dengan sopan
-- Gunakan bahasa Indonesia yang baik dan benar
-- Artikel mungkin mengandung token penanda gambar berbentuk [[GAMBAR_0]], [[GAMBAR_1]], dst. JANGAN ubah, jangan hapus, dan PERTAHANKAN token tersebut persis di posisi aslinya.`;
+- Artikel mungkin mengandung token penanda gambar berbentuk [[GAMBAR_0]], [[GAMBAR_1]], dst. JANGAN ubah, jangan hapus, dan PERTAHANKAN token tersebut persis di posisi aslinya`;
+
+export interface ChatResponse {
+  type: 'article' | 'answer';
+  content: string;
+}
 
 export async function callArticleChat(
   article: string,
   userPrompt: string,
-): Promise<string> {
+): Promise<ChatResponse> {
   const apiKey = OLLAMA_API_KEY;
   if (!apiKey.trim() && !OLLAMA_SKIP_AUTH) {
     throw new Error('API key tidak tersedia. Tambahkan VITE_OLLAMA_API_KEY di .env');
@@ -50,7 +59,7 @@ export async function callArticleChat(
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPERMINTAAN USER:\n${userPrompt}`,
+            content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPESAN USER:\n${userPrompt}`,
           },
         ],
         stream: false,
@@ -74,10 +83,20 @@ export async function callArticleChat(
     images.forEach((img, i) => {
       resultText = resultText.split(`[[GAMBAR_${i}]]`).join(img);
     });
-    // Drop any leftover tokens the model may have produced
     resultText = resultText.replace(/\[\[GAMBAR_\d+\]\]/g, '');
 
-    return resultText;
+    // Determine response type
+    if (resultText.startsWith('[ARTICLE]')) {
+      return { type: 'article', content: resultText.replace(/^\[ARTICLE\]\s*/, '').trim() };
+    }
+    if (resultText.startsWith('[ANSWER]')) {
+      return { type: 'answer', content: resultText.replace(/^\[ANSWER\]\s*/, '').trim() };
+    }
+    // Fallback: if it looks like markdown with headings, treat as article
+    if (/^#{1,3}\s/m.test(resultText) || resultText.includes('\n---\n')) {
+      return { type: 'article', content: resultText };
+    }
+    return { type: 'answer', content: resultText };
   } catch (err) {
     clearTimeout(timeout);
     throw err;

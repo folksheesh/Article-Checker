@@ -24,6 +24,7 @@ Kriteria:
 3. Klaim hukum akurat dan tidak menyesatkan (tidak membuat klaim absolut jika tidak pasti, tidak mengada-ada).
 4. CTA persuasif dan relevan dengan topik (bukan hanya "hubungi kami" kering).
 5. Pembukaan dan penutup kuat serta memberikan kesan profesional.
+6. Pemakaian huruf kapital dan kecil pada kata-kata sudah benar (kata di awal kalimat menggunakan huruf kapital, nama badan hukum / merek / proper noun ditulis dengan kapitalisasi yang benar, akronim seperti "PT", "UU", "Pasal" ditulis dengan tepat, tidak ada kata ALL CAPS di tengah kalimat biasa, dan kata sapaan "Anda" selalu diawali huruf kapital).
 
 Setiap kriteria dinilai dengan skor 0-100 dan diberikan alasan singkat (max 150 karakter) serta kutipan teks yang bermasalah jika ada.
 
@@ -97,7 +98,7 @@ ${truncatedArticle}`;
     const parsed = JSON.parse(cleaned);
 
     return (parsed.results || []).map((r: any) => {
-      const id = Number(r.id) as 51 | 52 | 53 | 54 | 55;
+      const id = Number(r.id) as 51 | 52 | 53 | 54 | 55 | 56;
       const passed = Boolean(r.passed);
       const score = Number(r.score) || 0;
       return {
@@ -119,7 +120,7 @@ ${truncatedArticle}`;
 }
 
 function createSkippedResults(fallbackReason?: string): CheckResult[] {
-  const ids: Array<51 | 52 | 53 | 54 | 55> = [51, 52, 53, 54, 55];
+  const ids: Array<51 | 52 | 53 | 54 | 55 | 56> = [51, 52, 53, 54, 55, 56];
   return ids.map((id) => ({
     id,
     question: SOP_QUESTIONS[id],

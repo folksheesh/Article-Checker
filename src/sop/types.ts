@@ -1,4 +1,4 @@
-export type RuleId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 51 | 52 | 53 | 54 | 55;
+export type RuleId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 51 | 52 | 53 | 54 | 55 | 56;
 
 export type CheckStatus = 'passed' | 'failed' | 'deferred';
 

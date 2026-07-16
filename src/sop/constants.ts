@@ -26,6 +26,7 @@ export const SOP_QUESTIONS: Record<RuleId, string> = {
   53: 'Apakah klaim hukum dalam artikel akurat dan tidak menyesatkan?',
   54: 'Apakah CTA terasa persuasif dan relevan dengan topik?',
   55: 'Apakah pembukaan dan penutup artikel kuat serta memberikan kesan profesional?',
+  56: 'Apakah pemakaian huruf kapital dan kecil pada kata-kata sudah tepat (awal kalimat, nama/proper noun, dan akronim)?',
 };
 
 export const MAX_TITLE_CHARS = 60;
