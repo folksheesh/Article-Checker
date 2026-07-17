@@ -1,4 +1,4 @@
-import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
+import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH, AI_CHAT_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
 
 const SYSTEM_PROMPT = `Anda adalah asisten penulis artikel hukum Indonesia. Tugas Anda membantu user menulis dan menyempurnakan artikel mereka.
@@ -48,7 +48,7 @@ export async function callArticleChat(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), AI_CHAT_TIMEOUT_MS);
 
   try {
     const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
@@ -60,7 +60,7 @@ export async function callArticleChat(
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPESAN USER:\n${userPrompt}`,
+            content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPESAN USER:\n${stripImages(userPrompt)}`,
           },
         ],
         stream: false,

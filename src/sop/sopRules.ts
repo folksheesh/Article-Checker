@@ -57,6 +57,10 @@ function containsAny(haystack: string, needles: string[]): boolean {
   });
 }
 
+export function getPrimaryKeyword(keyword: string): string {
+  return keyword.split(',').map((k) => k.trim()).filter(Boolean)[0] || '';
+}
+
 function containsUrgency(text: string): boolean {
   if (!containsAny(text, URGENCY_KEYWORDS)) return false;
   // Ignore negated phrasing like "tanpa urgensi" / "tidak penting"
@@ -117,7 +121,7 @@ function checkTitleClarity(parsed: ParsedArticle): CheckResult {
 }
 
 function checkKeywordInTitle(parsed: ParsedArticle, keyword: string): CheckResult {
-  const kw = keyword.trim().toLowerCase();
+  const kw = getPrimaryKeyword(keyword).toLowerCase();
   if (!kw) {
     return result(2, 'failed', 'Keyword utama belum diisi.', '');
   }
@@ -350,7 +354,7 @@ function checkRegulation(parsed: ParsedArticle): CheckResult {
 }
 
 function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResult {
-  const kw = keyword.trim().toLowerCase();
+  const kw = getPrimaryKeyword(keyword).toLowerCase();
   if (!kw || parsed.wordCount === 0) {
     return result(
       16,
@@ -439,7 +443,7 @@ function checkHeadingQuality(parsed: ParsedArticle, keyword: string): CheckResul
     return result(18, 'failed', 'Belum ada subheading H2. Tambahkan H2 untuk membagi topik.', '');
   }
 
-  const kw = keyword.trim().toLowerCase();
+  const kw = getPrimaryKeyword(keyword).toLowerCase();
   const weak = h2.find((h) => {
     const t = h.text.toLowerCase();
     return t.length < 8 || /^\d+\.?\s*$/i.test(t) || t.split(/\s+/).length < 2;
@@ -589,11 +593,6 @@ function checkMeta(metaTitle: string, metaDesc: string): CheckResult {
   return result(14, 'passed', 'Meta title dan description sudah terisi dengan panjang yang sesuai.', '');
 }
 
-function checkAltText(_parsed: ParsedArticle, _keyword: string): CheckResult {
-  // Editor no longer supports images — always deferred
-  return result(15, 'deferred', 'Pengecekan alt text tidak aktif karena editor ini tidak mendukung gambar.', '');
-}
-
 export function runSopChecks(input: ArticleInput): SopReport {
   const parsed = parseArticle(input.article);
   const items: CheckResult[] = [
@@ -616,7 +615,6 @@ export function runSopChecks(input: ArticleInput): SopReport {
     checkWordCount(parsed),
     checkLinks(parsed),
     checkMeta(input.metaTitle, input.metaDesc),
-    checkAltText(parsed, input.keyword),
   ];
   return calculateSopScore(items, parsed.wordCount);
 }

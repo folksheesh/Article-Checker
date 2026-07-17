@@ -39,6 +39,19 @@ export interface ArticleInput {
   metaDesc: string;
 }
 
+export interface SubScores {
+  seo: number;
+  structure: number;
+  intent: number;
+  tone: number;
+}
+
+export interface AiEvaluationOutput {
+  results: CheckResult[];
+  subScores: SubScores;
+  bestNextMove: string;
+}
+
 export interface HeadingInfo {
   level: 1 | 2 | 3;
   text: string;

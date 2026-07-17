@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import mammoth from 'mammoth';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 
-pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+const DRAFT_KEY = 'ac_legal_checker_draft_v1';
+
 import {
   Bold,
   Italic,
@@ -18,9 +19,11 @@ import {
   Quote,
   Link as LinkIcon,
   Upload,
+  Download,
   BookOpen,
   CheckCircle2,
   XCircle,
+  X,
   AlertCircle,
 
   Sparkles,
@@ -28,13 +31,23 @@ import {
   Target,
   Scale,
   Loader,
+  Search,
   Image as ImageIcon,
   Bot,
   RotateCcw,
+  Trash2,
+  ArrowRight,
+  AlignLeft,
+  AlignCenter,
+  AlignRight,
+  AlignJustify,
+  FileText,
 } from 'lucide-react';
-import { runSopChecks, evaluateWithAI, autoReviseItem, callOllamaGenerateKeyword, type CheckResult, type SopReport } from './sop';
+import html2pdf from 'html2pdf.js';
+import * as docx from 'docx';
+import { runSopChecks, evaluateWithAI, autoReviseItem, callOllamaGenerateKeywords, getPrimaryKeyword, type CheckResult, type SopReport, type AiEvaluationOutput } from './sop';
 import { callArticleChat } from './sop/articleChat';
-import { OLLAMA_API_KEY } from './sop/config';
+import { OLLAMA_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
 import { stripImages } from './sop/images';
 
 const CATEGORIES = [
@@ -80,8 +93,21 @@ function markdownToHtml(md: string): string {
     .replace(/>/g, '&gt;');
 
   // Images (must be before links: ![alt](url) contains [text](url) pattern)
-  html = html.replace(/!\[(.*?)\]\((.*?)\s+"(\d+)"\)/g, '<img src="$2" alt="$1" width="$3" style="max-width:100%;border-radius:8px;" />');
-  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;" />');
+  // Support ![alt](src "width") and ![alt](src "width align")
+  html = html.replace(/!\[(.*?)\]\((.*?)\s+"([^"]*)"\)/g, (_match, alt, src, meta) => {
+    const parts = meta.trim().split(/\s+/).filter(Boolean);
+    const width = /^\d+$/.test(parts[0] || '') ? parts[0] : '';
+    const align = (parts[1] || 'inline').toLowerCase();
+    let attrs = `src="${src}" alt="${alt}"`;
+    if (width) attrs += ` width="${width}"`;
+    attrs += ` data-align="${align}"`;
+    const baseStyle = 'max-width:100%;border-radius:8px;';
+    if (align === 'center') attrs += ` style="${baseStyle} display:block;margin-left:auto;margin-right:auto;"`;
+    else if (align === 'right') attrs += ` style="${baseStyle} display:block;margin-left:auto;margin-right:0;"`;
+    else attrs += ` style="${baseStyle}"`;
+    return `<img ${attrs} />`;
+  });
+  html = html.replace(/!\[(.*?)\]\((.*?)\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:8px;" data-align="inline" />');
 
   // Links
   html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" class="editor-link">$1</a>');
@@ -219,8 +245,11 @@ function htmlToMarkdown(html: string): string {
         const src = el.getAttribute('src') || '';
         const alt = el.getAttribute('alt') || '';
         const w = el.getAttribute('width') || el.style.width;
+        const align = (el.getAttribute('data-align') || 'inline').toLowerCase();
         const wNum = w ? String(w).replace('px', '') : '';
-        return wNum ? `![${alt}](${src} "${wNum}")\n` : `![${alt}](${src})\n`;
+        let title = wNum;
+        if (align !== 'inline') title += (title ? ' ' : '') + align;
+        return title ? `![${alt}](${src} "${title}")\n` : `![${alt}](${src})\n`;
       case 'mark':
         return children;
       default:
@@ -306,14 +335,6 @@ function getCategoryIssue(report: SopReport, categoryId: string) {
   return report.items.find((item) => cat.checks.includes(item.id) && item.status === 'failed');
 }
 
-function generateSummary(report: SopReport) {
-  const failedCategories = CATEGORIES.filter((c) => getCategoryStatus(report, c.id) === 'failed');
-  if (failedCategories.length === 0) {
-    return 'Semua poin kualitas sudah terpenuhi. Artikel siap diterbitkan.';
-  }
-  const issueNames = failedCategories.map((c) => c.label);
-  return `Ditemukan ${failedCategories.length} area yang perlu diperbaiki: ${issueNames.join(', ')}.`;
-}
 
 function findTextNodeAndOffset(container: HTMLElement, globalOffset: number): [Node, number] | null {
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
@@ -338,14 +359,27 @@ export default function App() {
   const [liveReport, setLiveReport] = useState<SopReport | null>(null);
   const [report, setReport] = useState<SopReport | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [aiResults, setAiResults] = useState<CheckResult[] | null>(null);
+  const [aiResults, setAiResults] = useState<AiEvaluationOutput | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; issue: CheckResult } | null>(null);
   const [fixingId, setFixingId] = useState<number | null>(null);
   const [flashText, setFlashText] = useState('');
   const [showKwPopup, setShowKwPopup] = useState(false);
   const [kwGenLoading, setKwGenLoading] = useState(false);
   const [kwGenError, setKwGenError] = useState('');
+  const [kwSuggestions, setKwSuggestions] = useState<string[]>([]);
+  const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set());
+  const [kwSearch, setKwSearch] = useState('');
+
+  const filteredKeywords = useMemo(() => {
+    const q = kwSearch.trim().toLowerCase();
+    if (!q) return kwSuggestions;
+    return kwSuggestions.filter((kw) => kw.toLowerCase().includes(q));
+  }, [kwSuggestions, kwSearch]);
+  const [fileImportLoading, setFileImportLoading] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
   const [showPassedIssues, setShowPassedIssues] = useState(false);
   const [showMobileEval, setShowMobileEval] = useState(false);
   const selectedImgRef = useRef<HTMLImageElement | null>(null);
@@ -357,20 +391,24 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant'; content: string; type?: 'article' | 'answer' }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [draftSaved, setDraftSaved] = useState(false);
   const chatRef = useRef<HTMLDivElement>(null);
 
   const editorRef = useRef<HTMLDivElement>(null);
   const editorWrapperRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const imgToolbarRef = useRef<HTMLDivElement>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const analysisAbortRef = useRef<AbortController | null>(null);
   const undoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
   const redoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
   const lastUndoRef = useRef(0);
 
   const pushUndo = () => {
     undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
-    if (undoStackRef.current.length > 20) undoStackRef.current.shift();
+    if (undoStackRef.current.length > UNDO_STACK_LIMIT) undoStackRef.current.shift();
     redoStackRef.current = [];
   };
 
@@ -468,7 +506,13 @@ export default function App() {
       const img = selectedImgRef.current;
       if (!img || !document.contains(img)) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
       const rect = img.getBoundingClientRect();
-      setSelectedImgInfo((prev) => prev ? { ...prev, x: rect.left + rect.width / 2, y: rect.top - 48 } : null);
+      const widthAttr = img.getAttribute('width');
+      const width = widthAttr ? parseInt(widthAttr) : Math.round(rect.width);
+      setSelectedImgInfo((prev) => {
+        if (!prev) return null;
+        const pos = positionPopupFor(rect, 320, 44, true, 48);
+        return { ...prev, x: pos.x, y: pos.y, width };
+      });
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
@@ -484,8 +528,9 @@ export default function App() {
       const rect = target.getBoundingClientRect();
       setHover((prev) => {
         if (!prev) return null;
-        const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
-        return { ...prev, x: rect.left + rect.width / 2, y };
+        const above = rect.top - 48 >= 0;
+        const pos = positionPopupFor(rect, 288, 250, above, 48);
+        return { ...prev, x: pos.x, y: pos.y };
       });
     };
     el.addEventListener('scroll', onScroll, { passive: true });
@@ -501,6 +546,60 @@ export default function App() {
     setLiveReport(next);
   }, [article, keyword, metaTitle, metaDesc]);
 
+  // Load saved draft on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(DRAFT_KEY);
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (typeof data.article === 'string') setArticleFromMarkdown(data.article);
+        if (typeof data.keyword === 'string') setKeyword(data.keyword);
+        if (typeof data.metaTitle === 'string') setMetaTitle(data.metaTitle);
+        if (typeof data.metaDesc === 'string') setMetaDesc(data.metaDesc);
+        if (Array.isArray(data.chatMessages)) setChatMessages(data.chatMessages);
+      }
+    } catch {
+      // ignore corrupt storage
+    }
+  }, []);
+
+  // Auto-save draft with debounce
+  useEffect(() => {
+    clearTimeout(saveDraftTimeoutRef.current);
+    setDraftSaved(false);
+    saveDraftTimeoutRef.current = setTimeout(() => {
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify({
+          article,
+          keyword,
+          metaTitle,
+          metaDesc,
+          chatMessages,
+        }));
+        setDraftSaved(true);
+        setTimeout(() => setDraftSaved(false), 2000);
+      } catch {
+        // storage may be full or unavailable
+      }
+    }, 1000);
+    return () => clearTimeout(saveDraftTimeoutRef.current);
+  }, [article, keyword, metaTitle, metaDesc, chatMessages]);
+
+  // Global Escape key to close popups/modals/toolbars
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (showKwPopup) { setShowKwPopup(false); return; }
+      if (showResetModal) { setShowResetModal(false); return; }
+      if (showExportModal) { setShowExportModal(false); return; }
+      if (chatOpen) { setChatOpen(false); return; }
+      if (selectedImgInfo) { selectedImgRef.current = null; setSelectedImgInfo(null); return; }
+      if (hover) { hoverTargetRef.current = null; setHover(null); }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [showKwPopup, showResetModal, showExportModal, chatOpen, selectedImgInfo, hover]);
+
   useEffect(() => {
     if (!article.trim()) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -510,6 +609,27 @@ export default function App() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [article]);
+
+  // Re-position image toolbar after mount once we know its actual width
+  useEffect(() => {
+    const el = imgToolbarRef.current;
+    if (!el || !selectedImgInfo) return;
+    const actualW = el.offsetWidth;
+    if (actualW > 0) {
+      const nx = clampPopupX(selectedImgInfo.x, actualW);
+      const ny = clampPopupY(selectedImgInfo.y, 44);
+      if (Math.abs(nx - selectedImgInfo.x) > 1 || Math.abs(ny - selectedImgInfo.y) > 1) {
+        setSelectedImgInfo((prev) => prev ? { ...prev, x: nx, y: ny } : null);
+      }
+    }
+  }, [selectedImgInfo]);
+
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    const el = chatRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, [chatMessages, chatLoading]);
 
   const score = useMemo(() => {
     if (!report) return 0;
@@ -588,6 +708,18 @@ export default function App() {
         if (url) document.execCommand('createLink', false, url);
         break;
       }
+      case 'align-left':
+        document.execCommand('justifyLeft');
+        break;
+      case 'align-center':
+        document.execCommand('justifyCenter');
+        break;
+      case 'align-right':
+        document.execCommand('justifyRight');
+        break;
+      case 'align-justify':
+        document.execCommand('justifyFull');
+        break;
     }
 
     syncFromEditor();
@@ -604,19 +736,38 @@ export default function App() {
     syncFromEditor();
   };
 
+  const clampPopupX = (x: number, pw: number) => {
+    const m = 8;
+    const hw = pw / 2;
+    return Math.max(hw + m, Math.min(x, window.innerWidth - hw - m));
+  };
+  const clampPopupY = (y: number, ph: number) => {
+    const m = 8;
+    if (y + ph + m > window.innerHeight) y = window.innerHeight - ph - m;
+    return Math.max(m, y);
+  };
+  const positionPopupFor = (rect: DOMRect, width: number, height: number, above: boolean, gap: number) => {
+    const cx = rect.left + rect.width / 2;
+    let cy = above ? rect.top - gap : rect.bottom + gap;
+    cy = clampPopupY(cy, height);
+    if (above && cy < 8) cy = clampPopupY(rect.bottom + gap, height);
+    return { x: clampPopupX(cx, width), y: cy };
+  };
+
   const showIssuePopup = (target: HTMLElement) => {
     if (target.tagName !== 'MARK' || !target.dataset.issueId) return;
     const issueId = Number(target.dataset.issueId);
     const issue =
       liveReport?.items.find((item) => item.id === issueId) ??
-      aiResults?.find((item) => item.id === issueId);
+      aiResults?.results.find((item) => item.id === issueId);
     if (!issue) return;
     hoverTargetRef.current = target;
     const rect = target.getBoundingClientRect();
-    const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
+    const above = rect.top - 48 >= 0;
+    const pos = positionPopupFor(rect, 288, 250, above, 48);
     setHover({
-      x: rect.left + rect.width / 2,
-      y,
+      x: pos.x,
+      y: pos.y,
       issue,
     });
   };
@@ -652,14 +803,20 @@ export default function App() {
         const rect = img.getBoundingClientRect();
         const wrapper = editorWrapperRef.current;
         const maxW = wrapper?.clientWidth ?? 800;
-        const y = rect.top - 48 < 10 ? rect.bottom + 10 : rect.top - 48;
+        const above = rect.top - 48 >= 10;
+        const pos = positionPopupFor(rect, 320, 44, above, 48);
+        const widthAttr = img.getAttribute('width');
+        const width = widthAttr ? parseInt(widthAttr) : Math.round(rect.width);
+        const align = img.getAttribute('data-align') || (
+          img.style.display === 'block' && img.style.marginLeft === 'auto' && img.style.marginRight === 'auto' ? 'center'
+          : img.style.display === 'block' && img.style.marginLeft === 'auto' ? 'right'
+          : 'inline'
+        );
         setSelectedImgInfo({
-          width: Math.round(rect.width),
-          align: img.style.display === 'block' && img.style.marginLeft === 'auto' && img.style.marginRight === 'auto' ? 'center'
-            : img.style.display === 'block' && img.style.marginLeft === 'auto' ? 'right'
-            : 'inline',
-          x: rect.left + rect.width / 2,
-          y,
+          width,
+          align,
+          x: pos.x,
+          y: pos.y,
           maxWidth: maxW,
         });
       }
@@ -682,7 +839,7 @@ export default function App() {
 
     // Always include AI results in highlights if available (exclude case issues, id 56)
     if (!reportOverride && aiResults) {
-      const failedAi = aiResults.filter(
+      const failedAi = aiResults.results.filter(
         (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
       );
       if (failedAi.length > 0) {
@@ -804,10 +961,11 @@ export default function App() {
     if (foundMark) {
       hoverTargetRef.current = foundMark;
       const rect = foundMark.getBoundingClientRect();
-      const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
+      const above = rect.top - 48 >= 0;
+      const pos = positionPopupFor(rect, 288, 250, above, 48);
       setHover({
-        x: rect.left + rect.width / 2,
-        y,
+        x: pos.x,
+        y: pos.y,
         issue,
       });
     } else if (m) {
@@ -816,10 +974,11 @@ export default function App() {
       if (sel && sel.rangeCount > 0) {
         const range = sel.getRangeAt(0);
         const rect = range.getBoundingClientRect();
-        const y = rect.top - 60 < 0 ? rect.bottom + 8 : rect.top - 48;
+        const above = rect.top - 48 >= 0;
+        const pos = positionPopupFor(rect, 288, 250, above, 48);
         setHover({
-          x: rect.left + rect.width / 2,
-          y,
+          x: pos.x,
+          y: pos.y,
           issue,
         });
       } else {
@@ -828,7 +987,7 @@ export default function App() {
     } else {
       setHover({ x: editor.clientWidth / 2, y: 100, issue });
     }
-    setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 4000);
+    setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 15000);
   };
 
   const handleAutoCorrect = async (item: CheckResult) => {
@@ -836,7 +995,7 @@ export default function App() {
     setFixingId(item.id);
     try {
       const result = await autoReviseItem(
-        { article: stripImages(article), keyword, metaTitle, metaDesc },
+        { article, keyword, metaTitle, metaDesc },
         item,
         '',
       );
@@ -858,8 +1017,11 @@ export default function App() {
       setLiveReport(newReport);
       setReport(newReport);
       requestAnimationFrame(() => applyHighlights(newReport));
-    } catch {
+    } catch (err: unknown) {
       setHover(null);
+      const msg = err instanceof Error ? err.message : 'Gagal memperbaiki. Silakan coba lagi.';
+      setFlashText(`Auto Correct gagal: ${msg}`);
+      setTimeout(() => setFlashText(''), 4000);
     } finally {
       setFixingId(null);
     }
@@ -906,10 +1068,10 @@ export default function App() {
     setKwGenLoading(true);
     setKwGenError('');
     try {
-      const kw = await callOllamaGenerateKeyword(OLLAMA_API_KEY, stripImages(article));
-      if (kw) {
-        setKeyword(kw);
-        setShowKwPopup(false);
+      const keywords = await callOllamaGenerateKeywords(OLLAMA_API_KEY, article);
+      if (keywords.length > 0) {
+        setKwSuggestions(keywords);
+        setSelectedKeywords(new Set());
       } else {
         setKwGenError('Gagal menghasilkan keyword. Coba lagi.');
       }
@@ -920,10 +1082,39 @@ export default function App() {
     }
   };
 
+  const toggleKeyword = (kw: string) => {
+    setSelectedKeywords((prev) => {
+      const next = new Set(prev);
+      if (next.has(kw)) next.delete(kw);
+      else next.add(kw);
+      return next;
+    });
+  };
+
+  const selectAllKeywords = () => {
+    const filtered = kwSuggestions.filter((kw) => kw.toLowerCase().includes(kwSearch.toLowerCase()));
+    setSelectedKeywords(new Set(filtered));
+  };
+
+  const deselectAllKeywords = () => {
+    setSelectedKeywords(new Set());
+  };
+
+  const applySelectedKeywords = () => {
+    const selected = Array.from(selectedKeywords);
+    if (selected.length > 0) {
+      setKeyword(selected.join(', '));
+    }
+    setShowKwPopup(false);
+    setFlashText(`${selected.length} keyword dipilih`);
+    setTimeout(() => setFlashText(''), 2500);
+  };
+
   const runAnalysis = () => {
     setIsAnalyzing(true);
     setAiLoading(true);
     setAiResults(null);
+    setAiError(null);
     if (window.innerWidth < 768) setShowMobileEval(true);
     const sopReport = liveReport;
     window.setTimeout(() => {
@@ -932,28 +1123,34 @@ export default function App() {
       setIsAnalyzing(false);
     }, 300);
 
+    // Abort any previous analysis request
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = new AbortController();
+    const signal = analysisAbortRef.current.signal;
+
     evaluateWithAI(
       {
         article: stripImages(article),
-        keyword,
-        metaTitle,
-        metaDesc,
+        keyword: stripImages(getPrimaryKeyword(keyword)),
+        metaTitle: stripImages(metaTitle),
+        metaDesc: stripImages(metaDesc),
       },
       '',
+      signal,
     )
-      .then((results) => {
-        const allDeferred = results.every((r) => r.status === 'deferred');
-        if (allDeferred && results.length > 0) {
-          const firstReason = results[0].reason || '';
+      .then((output) => {
+        const allDeferred = output.results.every((r) => r.status === 'deferred');
+        if (allDeferred && output.results.length > 0) {
+          const firstReason = output.results[0].reason || '';
           if (/image|vision|multimodal/i.test(firstReason)) {
-            setAiResults([]);
+            setAiResults({ results: [], subScores: output.subScores, bestNextMove: output.bestNextMove });
             setFlashText('Model AI tidak mendukung gambar. Gambar telah dihapus dari teks yang dikirim ke AI.');
             setTimeout(() => setFlashText(''), 4000);
             return;
           }
         }
-        setAiResults(results);
-        const failedAi = results.filter(
+        setAiResults(output);
+        const failedAi = output.results.filter(
           (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
         );
         if (failedAi.length > 0 && sopReport) {
@@ -963,8 +1160,14 @@ export default function App() {
           });
         }
       })
-      .catch(() => setAiResults([]))
-      .finally(() => setAiLoading(false));
+      .catch((err) => {
+        if (err.name === 'AbortError') return;
+        setAiError(err instanceof Error ? err.message : 'Gagal terhubung ke AI.');
+        setAiResults({ results: [], subScores: { seo: 0, structure: 0, intent: 0, tone: 0 }, bestNextMove: '' });
+      })
+      .finally(() => {
+        if (!signal.aborted) setAiLoading(false);
+      });
   };
 
   const loadMockArticle = () => {
@@ -998,7 +1201,24 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     const file = e.target.files?.[0];
     if (!file) return;
 
+    const MAX_SIZE = 10 * 1024 * 1024; // 10 MB
+    if (file.size > MAX_SIZE) {
+      setFlashText('Ukuran file maksimal 10 MB.');
+      setTimeout(() => setFlashText(''), 4000);
+      e.target.value = '';
+      return;
+    }
+
     const ext = file.name.split('.').pop()?.toLowerCase();
+    if (!ext || !['pdf', 'docx', 'txt', 'md'].includes(ext)) {
+      setFlashText('Format file tidak didukung. Gunakan .pdf, .docx, .txt, atau .md.');
+      setTimeout(() => setFlashText(''), 4000);
+      e.target.value = '';
+      return;
+    }
+
+    setFileImportLoading(true);
+    setFlashText('Membaca file...');
 
     try {
       let text = '';
@@ -1007,75 +1227,113 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         const buf = await file.arrayBuffer();
         const pdf = await pdfjs.getDocument({ data: buf }).promise;
         const pages: string[] = [];
+        let totalTextItems = 0;
         for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const content = await page.getTextContent();
-          const fontSize = 12;
-          const Y_TOL = fontSize * 0.5;
-          const PARA_GAP = fontSize * 1.8;
-          const SPACE_GAP = fontSize * 0.3;
-          const textItems = content.items.filter((it): it is any => 'str' in it);
+          try {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            const fontSize = 12;
+            const Y_TOL = fontSize * 0.5;
+            const PARA_GAP = fontSize * 1.8;
+            const SPACE_GAP = fontSize * 0.3;
+            const textItems = content.items.filter((it): it is any => 'str' in it);
+            totalTextItems += textItems.length;
+            console.log(`PDF page ${i}: ${textItems.length} text items`);
+            if (textItems.length === 0) continue;
 
-          const avgHeight = textItems.reduce((s: number, it: any) => s + (it.height || fontSize), 0) / textItems.length;
+            const avgHeight = textItems.reduce((s: number, it: any) => s + (it.height || fontSize), 0) / textItems.length;
 
-          type Line = { words: { x: number; w: number; t: string }[]; y: number; h: number };
-          const lines: Line[] = [];
-          let cur: Line | null = null;
-          for (const item of textItems) {
-            const y = item.transform[5], x = item.transform[4];
-            const w = item.width || 0, h = item.height || avgHeight || fontSize;
-            if (cur && Math.abs(y - cur.y) <= Y_TOL) {
-              cur.words.push({ x, w, t: item.str });
-              cur.y = y;
-              cur.h = Math.max(cur.h, h);
-            } else {
-              if (cur) lines.push(cur);
-              cur = { words: [{ x, w, t: item.str }], y, h };
+            type Line = { words: { x: number; w: number; t: string }[]; y: number; h: number };
+            const lines: Line[] = [];
+            let cur: Line | null = null;
+            for (const item of textItems) {
+              const y = item.transform[5], x = item.transform[4];
+              const w = item.width || 0, h = item.height || avgHeight || fontSize;
+              if (cur && Math.abs(y - cur.y) <= Y_TOL) {
+                cur.words.push({ x, w, t: item.str });
+                cur.y = y;
+                cur.h = Math.max(cur.h, h);
+              } else {
+                if (cur) lines.push(cur);
+                cur = { words: [{ x, w, t: item.str }], y, h };
+              }
             }
-          }
-          if (cur) lines.push(cur);
+            if (cur) lines.push(cur);
 
-          const pageLines: string[] = [];
-          let prevY = -9999;
-          for (const line of lines) {
-            line.words.sort((a, b) => a.x - b.x);
-            const parts: string[] = [];
-            let lx = -9999;
-            for (const w of line.words) {
-              if (lx >= 0 && w.x - lx > SPACE_GAP) parts.push(' ');
-              parts.push(w.t);
-              lx = w.x + w.w;
+            const pageLines: string[] = [];
+            let prevY = -9999;
+            for (const line of lines) {
+              line.words.sort((a, b) => a.x - b.x);
+              const parts: string[] = [];
+              let lx = -9999;
+              for (const w of line.words) {
+                if (lx >= 0 && w.x - lx > SPACE_GAP) parts.push(' ');
+                parts.push(w.t);
+                lx = w.x + w.w;
+              }
+              const raw = parts.join('').trim();
+              if (!raw) continue;
+
+              const gap = line.y - prevY;
+              let prefix = '';
+              if (prevY <= -9990) { prefix = ''; }
+              else if (gap > PARA_GAP) { prefix = '\n\n'; }
+              else { prefix = '\n'; }
+
+              const ratio = line.h / avgHeight;
+              let headingPrefix = '';
+              if (ratio >= 2.0 && raw.length < 100) headingPrefix = '# ';
+              else if (ratio >= 1.4 && raw.length < 120) headingPrefix = '## ';
+              else if (ratio >= 1.15 && raw.length < 120) headingPrefix = '### ';
+              pageLines.push(prefix + headingPrefix + raw);
+              prevY = line.y;
             }
-            const raw = parts.join('').trim();
-            if (!raw) continue;
 
-            const gap = line.y - prevY;
-            let prefix = '';
-            if (prevY <= -9990) { prefix = ''; }
-            else if (gap > PARA_GAP) { prefix = '\n\n'; }
-            else { prefix = '\n'; }
-
-            const isHeading = line.h > avgHeight * 1.5 && raw.length < 80;
-            pageLines.push(prefix + (isHeading ? '## ' + raw : raw));
-            prevY = line.y;
+            pages.push(pageLines.join(''));
+          } catch (pageErr) {
+            console.error(`PDF page ${i} extraction error:`, pageErr);
           }
-
-          pages.push(pageLines.join(''));
         }
-        text = pages.join('\n\n');
+        if (totalTextItems === 0) {
+          throw new Error('PDF_EMPTY_TEXT: PDF tidak mengandung teks yang dapat diekstrak.');
+        }
+        text = pages.join('\n\n').trim();
+        if (!text) {
+          throw new Error('PDF_EMPTY_TEXT: PDF tidak mengandung teks yang dapat diekstrak.');
+        }
+        setArticleFromMarkdown(text);
       } else if (ext === 'docx') {
         const buf = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer: buf });
-        text = result.value;
+        const result = await mammoth.convertToHtml(
+          { arrayBuffer: buf },
+          { convertImage: mammoth.images.dataUri },
+        );
+        const html = result.value;
+        setEditorHtml(html);
+        setHtmlContent(html);
+        setArticle(htmlToMarkdown(html));
       } else {
         text = await file.text();
+        setArticleFromMarkdown(text);
       }
-
-      setArticleFromMarkdown(text);
+      setFlashText('File berhasil dibaca.');
+      setTimeout(() => setFlashText(''), 2000);
     } catch (err) {
       console.error('File upload error:', err);
-      setFlashText('Gagal membaca file: pastikan format file didukung.');
-      setTimeout(() => setFlashText(''), 3000);
+      const msg = err instanceof Error ? err.message : '';
+      if (msg.includes('password') || msg.includes('encrypted')) {
+        setFlashText('Gagal: file PDF terenkripsi atau memerlukan password.');
+      } else if (msg.includes('PDF_EMPTY_TEXT')) {
+        setFlashText('PDF tidak mengandung teks. Pastikan PDF bukan hasil scan/gambar.');
+      } else if (msg.includes('Invalid') || msg.includes('corrupt')) {
+        setFlashText('Gagal: file rusak atau tidak dapat diproses.');
+      } else {
+        setFlashText('Gagal membaca file: pastikan format file didukung.');
+      }
+      setTimeout(() => setFlashText(''), 4000);
+    } finally {
+      setFileImportLoading(false);
+      e.target.value = '';
     }
   };
 
@@ -1088,9 +1346,15 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = reader.result as string;
-        editor.focus();
-        document.execCommand('insertHTML', false, `<img src="${dataUrl}" alt="${file.name.replace(/\.[^.]+$/, '')}" style="max-width:100%;border-radius:8px;" />`);
-        syncFromEditor();
+        const img = new Image();
+        img.onload = () => {
+          const maxDefault = 600;
+          const defaultWidth = Math.min(img.naturalWidth, maxDefault);
+          editor.focus();
+          document.execCommand('insertHTML', false, `<img src="${dataUrl}" alt="${file.name.replace(/\.[^.]+$/, '')}" width="${defaultWidth}" style="max-width:100%;border-radius:8px;" data-align="inline" />`);
+          syncFromEditor();
+        };
+        img.src = dataUrl;
       };
       reader.readAsDataURL(file);
     } catch {
@@ -1131,27 +1395,248 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     }
   };
 
+  const doReset = () => {
+    setArticle('');
+    setHtmlContent('');
+    setKeyword('');
+    setMetaTitle('');
+    setMetaDesc('');
+    setChatMessages([]);
+    setReport(null);
+    setLiveReport(null);
+    setAiResults(null);
+    setAiError(null);
+    localStorage.removeItem(DRAFT_KEY);
+    if (editorRef.current) editorRef.current.innerHTML = '';
+    setShowResetModal(false);
+  };
+
+  const exportPdf = async () => {
+    const container = document.createElement('div');
+    container.innerHTML = htmlContent;
+    container.style.padding = '24px';
+    container.style.fontFamily = 'Arial, sans-serif';
+    container.style.fontSize = '12pt';
+    container.style.lineHeight = '1.6';
+    container.style.color = '#1e293b';
+    container.style.maxWidth = '210mm';
+    container.style.background = '#fff';
+
+    const style = document.createElement('style');
+    style.textContent = `
+      * { box-sizing: border-box; }
+      h1, h2, h3, h4, h5, h6 { color: #0f172a; line-height: 1.3; margin: 18pt 0 10pt; font-weight: 700; }
+      h1 { font-size: 22pt; }
+      h2 { font-size: 18pt; }
+      h3 { font-size: 15pt; }
+      p { margin: 0 0 10pt; }
+      ul, ol { margin: 0 0 10pt 18pt; padding-left: 18pt; }
+      ul { list-style-type: disc; }
+      ol { list-style-type: decimal; }
+      li { margin: 0 0 4pt 0; }
+      li > p { margin: 0; }
+      blockquote { margin: 10pt 0; padding: 10pt 14pt; border-left: 4px solid #cbd5e1; color: #475569; font-style: italic; background: #f8fafc; }
+      a { color: #2563eb; text-decoration: underline; }
+      b, strong { font-weight: 700; }
+      i, em { font-style: italic; }
+      u { text-decoration: underline; }
+      s, strike, del { text-decoration: line-through; }
+      img { max-width: 100%; height: auto; display: block; margin: 8px 0; border-radius: 6px; }
+      table { width: 100%; border-collapse: collapse; margin: 10pt 0; }
+      th, td { border: 1px solid #cbd5e1; padding: 6pt 8pt; text-align: left; }
+      th { background: #f1f5f9; font-weight: 700; }
+      .text-left, [style*="text-align:left"] { text-align: left; }
+      .text-center, [style*="text-align:center"] { text-align: center; }
+      .text-right, [style*="text-align:right"] { text-align: right; }
+      .text-justify, [style*="text-align:justify"] { text-align: justify; }
+      [data-align="left"] { margin-left: 0; margin-right: auto; }
+      [data-align="center"] { margin-left: auto; margin-right: auto; }
+      [data-align="right"] { margin-left: auto; margin-right: 0; }
+    `;
+    container.insertBefore(style, container.firstChild);
+
+    document.body.appendChild(container);
+    try {
+      const opt = {
+        margin: [12, 12, 12, 12] as [number, number, number, number],
+        filename: `${metaTitle || 'artikel'}.pdf`,
+        image: { type: 'jpeg' as const, quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, logging: false },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' as const },
+      };
+      await html2pdf().set(opt).from(container).save();
+    } finally {
+      document.body.removeChild(container);
+      setShowExportModal(false);
+    }
+  };
+
+  const exportDocx = async () => {
+    const base64ToUint8Array = (b64: string): Uint8Array => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
+    };
+
+    const getImageDimensions = (src: string, desiredWidth: number): Promise<{ width: number; height: number }> => {
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const ratio = img.naturalHeight / img.naturalWidth || 0.75;
+          const width = Math.min(desiredWidth, 600);
+          resolve({ width, height: Math.round(width * ratio) });
+        };
+        img.onerror = () => resolve({ width: desiredWidth, height: Math.round(desiredWidth * 0.75) });
+        img.src = src;
+      });
+    };
+
+    const convertInline = async (el: HTMLElement, forceItalics = false): Promise<docx.TextRun[]> => {
+      const runs: docx.TextRun[] = [];
+      for (const node of el.childNodes) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.textContent || '';
+          if (text) runs.push(new docx.TextRun({ text }));
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+          const child = node as HTMLElement;
+          const tag = child.tagName.toLowerCase();
+          if (tag === 'br') {
+            runs.push(new docx.TextRun({ text: '', break: 1 }));
+          } else {
+            const text = child.textContent || '';
+            if (!text) continue;
+            const props: any = {};
+            if (tag === 'b' || tag === 'strong') props.bold = true;
+            if ((tag === 'i' || tag === 'em') || forceItalics) props.italics = true;
+            if (tag === 'u') props.underline = { type: docx.UnderlineType.SINGLE };
+            if (tag === 'a') props.color = '#2563eb';
+            runs.push(new docx.TextRun({ text, ...props }));
+          }
+        }
+      }
+      return runs;
+    };
+
+    const convertImage = async (el: HTMLImageElement): Promise<docx.Paragraph | null> => {
+      const src = el.getAttribute('src') || '';
+      if (!src.startsWith('data:image')) return null;
+      const match = src.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.+)$/i);
+      if (!match) return null;
+      const ext = match[1].toLowerCase();
+      const data = base64ToUint8Array(match[2]);
+      const imageType = ext === 'png' ? 'png' : 'jpg';
+      const widthAttr = parseInt(el.getAttribute('width') || '600');
+      const { width, height } = await getImageDimensions(src, widthAttr || 600);
+      return new docx.Paragraph({
+        children: [new docx.ImageRun({ data, transformation: { width, height }, type: imageType })],
+      });
+    };
+
+    const convertBlock = async (el: HTMLElement): Promise<(docx.Paragraph | null)[]> => {
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'h1') return [new docx.Paragraph({ text: el.textContent || '', heading: docx.HeadingLevel.HEADING_1 })];
+      if (tag === 'h2') return [new docx.Paragraph({ text: el.textContent || '', heading: docx.HeadingLevel.HEADING_2 })];
+      if (tag === 'h3') return [new docx.Paragraph({ text: el.textContent || '', heading: docx.HeadingLevel.HEADING_3 })];
+      if (tag === 'p') return [new docx.Paragraph({ children: await convertInline(el) })];
+      if (tag === 'blockquote') return [new docx.Paragraph({ children: await convertInline(el, true) })];
+      if (tag === 'ul' || tag === 'ol') {
+        const updated = await Promise.all(
+          Array.from(el.querySelectorAll('li')).map(async (li) =>
+            new docx.Paragraph({ children: await convertInline(li), bullet: { level: 0 } })
+          ),
+        );
+        return updated;
+      }
+      if (tag === 'img') return [await convertImage(el as HTMLImageElement)];
+      return [new docx.Paragraph({ children: await convertInline(el) })];
+    };
+
+    try {
+      const parser = new DOMParser();
+      const dom = parser.parseFromString(htmlContent, 'text/html');
+      const blocks: docx.Paragraph[] = [];
+      for (const node of dom.body.childNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          const converted = await convertBlock(node as HTMLElement);
+          blocks.push(...converted.filter((p): p is docx.Paragraph => p !== null));
+        } else if (node.nodeType === Node.TEXT_NODE) {
+          const text = node.textContent?.trim();
+          if (text) blocks.push(new docx.Paragraph({ text }));
+        }
+      }
+      const docxDocument = new docx.Document({
+        sections: [{
+          properties: { page: { margin: { top: 720, right: 720, bottom: 720, left: 720 } } },
+          children: blocks,
+        }],
+      });
+      const blob = await docx.Packer.toBlob(docxDocument);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${metaTitle || 'artikel'}.docx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('DOCX export error:', err);
+      setFlashText('Gagal export DOCX. Coba lagi.');
+      setTimeout(() => setFlashText(''), 3000);
+    } finally {
+      setShowExportModal(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-white text-slate-800 font-sans antialiased">
+    <div className="min-h-screen bg-gray-50 text-gray-800 font-sans antialiased">
       {/* Header */}
-      <header className="h-14 border-b border-slate-100 flex items-center justify-between px-5 shrink-0">
-        <div className="flex items-center gap-2.5">
-          <div className="bg-slate-900 text-white p-1.5 rounded-md">
-            <Scale className="w-4 h-4" />
+      <header id="app-header" className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-5 shrink-0 shadow-sm">
+        <div id="header-brand" className="flex items-center gap-3">
+          <div className="bg-red-700 text-white p-2 rounded-lg shadow-sm shadow-red-700/20">
+            <Scale className="w-5 h-5" />
           </div>
-          <h1 className="text-sm font-semibold text-slate-900 tracking-tight">Article Legal Checker</h1>
+          <div className="flex flex-col">
+            <h1 id="app-title" className="text-sm font-bold text-gray-900 tracking-tight leading-tight">Article Legal Checker</h1>
+            <span className="text-[10px] text-gray-400 font-medium">Lafirm content workspace</span>
+          </div>
+          {draftSaved && (
+            <span id="draft-saved-badge" className="text-[10px] font-medium text-emerald-700 bg-emerald-50 px-2 py-1 rounded-full border border-emerald-100">Draft tersimpan</span>
+          )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div id="header-actions" className="flex items-center gap-2">
           <button
+            id="header-btn-reset"
+            type="button"
+            onClick={() => setShowResetModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Reset
+          </button>
+          <button
+            id="header-btn-export"
+            type="button"
+            onClick={() => setShowExportModal(true)}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Export
+          </button>
+          <button
+            id="header-btn-upload"
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-md transition"
+            disabled={fileImportLoading}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Upload className="w-3.5 h-3.5" />
-            Unggah
+            <Upload className={`w-3.5 h-3.5 ${fileImportLoading ? 'animate-spin' : ''}`} />
+            {fileImportLoading ? 'Membaca...' : 'Unggah'}
           </button>
           <input
+            id="file-input"
             type="file"
             ref={fileInputRef}
             onChange={handleFileUpload}
@@ -1159,9 +1644,10 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             className="hidden"
           />
           <button
+            id="header-btn-example"
             type="button"
             onClick={loadMockArticle}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 rounded-md transition"
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-gray-600 hover:bg-gray-100 rounded-lg transition"
           >
             <BookOpen className="w-3.5 h-3.5" />
             Contoh
@@ -1169,95 +1655,302 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </div>
       </header>
 
-      <main className="flex flex-col md:flex-row" style={{ height: 'calc(100dvh - 3.5rem)' }}>
-        {/* Editor Area */}
-        <section className={`${showMobileEval ? 'hidden' : 'flex'} md:flex w-full md:w-[70%] flex-col min-w-0 border-r border-slate-100 relative`}>
-          {/* Meta Header */}
-          <div className="px-4 md:px-10 py-5 border-b border-slate-50 space-y-3">
+      <main id="app-main" className="grid grid-cols-1 md:grid-cols-[7fr_3fr] md:grid-rows-[auto_1fr] gap-4 p-4 md:p-5" style={{ height: 'calc(130dvh - 4rem)' }}>
+        {/* Row 1 Col 1: Setup Artikel */}
+        <section id="setup-panel" className={`${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 min-h-0 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden`}>
+          <div className="h-1 bg-gradient-to-r from-red-700 to-red-400" />
+          <div id="meta-header" className="px-5 py-5 border-b border-gray-100 bg-gray-50/50 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-sm font-bold text-gray-900">Setup Artikel</h2>
+                <p className="text-[11px] text-gray-400 mt-0.5">Metadata dan fokus keyword</p>
+              </div>
+              <span className="text-[10px] font-medium text-gray-400 bg-white border border-gray-200 px-2 py-1 rounded-md">{wordCount} kata</span>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="col-span-1">
-                <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+              <div id="meta-keyword-field" className="col-span-1 bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+                <label htmlFor="input-keyword" className="block text-[10px] font-bold uppercase tracking-wider text-red-700 mb-1.5">
                   Keyword
                 </label>
                 <div className="flex items-center gap-1.5">
                   <input
+                    id="input-keyword"
                     type="text"
                     value={keyword}
                     onChange={(e) => setKeyword(e.target.value)}
                     placeholder="mendaftarkan merek"
-                    className="flex-1 bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm text-slate-700 placeholder:text-slate-300 transition"
+                    className="flex-1 bg-transparent border-b border-gray-200 hover:border-gray-300 focus:border-red-500 outline-none py-1 text-sm text-gray-800 placeholder:text-gray-300 transition"
                   />
+                  {keyword.length > 0 && (
+                    <button
+                      id="btn-keyword-clear"
+                      type="button"
+                      onClick={() => setKeyword('')}
+                      className="shrink-0 p-1 rounded-md text-gray-300 hover:text-red-600 hover:bg-red-50 transition"
+                      title="Hapus keyword"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <button
+                    id="btn-keyword-generate"
                     type="button"
                     onClick={() => setShowKwPopup(true)}
-                    className="shrink-0 p-1 rounded-md text-slate-300 hover:text-slate-600 hover:bg-slate-100 transition"
+                    className="shrink-0 p-1.5 rounded-md text-red-600 hover:text-red-700 hover:bg-red-50 transition"
                     title="Generate keyword dengan AI"
                   >
                     <Sparkles className="w-4 h-4" />
                   </button>
                 </div>
+                <div className="text-[10px] text-gray-400 mt-1.5 h-4" aria-live="polite">
+                  {keyword.length > 0 && `${keyword.length} karakter`}
+                </div>
               </div>
-              <div className="col-span-2">
-                <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                <div id="meta-title-field" className="col-span-2 bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+                <label htmlFor="input-title" className="block text-[10px] font-bold uppercase tracking-wider text-gray-700 mb-1.5">
                   Judul
                 </label>
-                <input
-                  type="text"
-                  value={metaTitle}
-                  onChange={(e) => setMetaTitle(e.target.value)}
-                  placeholder="Judul artikel"
-                  className="w-full bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm font-medium text-slate-900 placeholder:text-slate-300 transition"
-                />
+                <div className="relative">
+                  <input
+                    id="input-title"
+                    type="text"
+                    value={metaTitle}
+                    onChange={(e) => setMetaTitle(e.target.value)}
+                    placeholder="Judul artikel"
+                    className="w-full pr-6 bg-transparent border-b border-gray-200 hover:border-gray-300 focus:border-red-500 outline-none py-1 text-sm font-semibold text-gray-900 placeholder:text-gray-300 transition"
+                  />
+                  {metaTitle.length > 0 && (
+                    <button
+                      id="btn-title-clear"
+                      type="button"
+                      onClick={() => setMetaTitle('')}
+                      className="absolute right-0 top-1/2 -translate-y-1/2 p-1 text-gray-300 hover:text-red-600 transition"
+                      title="Hapus judul"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                {(() => {
+                  const len = metaTitle.length;
+                  const max = 60;
+                  const color = len > max ? 'text-red-600' : len > max * 0.9 ? 'text-amber-500' : 'text-gray-400';
+                  return (
+                    <div className={`text-[10px] mt-1.5 h-4 ${color}`} aria-live="polite">
+                      {len}/{max} karakter
+                    </div>
+                  );
+                })()}
               </div>
             </div>
-            <div>
-              <label className="block text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-1">
+            <div id="meta-desc-field" className="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+              <label htmlFor="input-desc" className="block text-[10px] font-bold uppercase tracking-wider text-gray-700 mb-1.5">
                 Deskripsi
               </label>
-              <input
-                type="text"
-                value={metaDesc}
-                onChange={(e) => setMetaDesc(e.target.value)}
-                placeholder="Ringkasan singkat artikel"
-                className="w-full bg-transparent border-b border-transparent hover:border-slate-200 focus:border-slate-400 outline-none py-1 text-sm text-slate-600 placeholder:text-slate-300 transition"
-              />
+              <div className="relative">
+                <input
+                  id="input-desc"
+                  type="text"
+                  value={metaDesc}
+                  onChange={(e) => setMetaDesc(e.target.value)}
+                  placeholder="Ringkasan singkat artikel"
+                  className="w-full pr-6 bg-transparent border-b border-gray-200 hover:border-gray-300 focus:border-red-500 outline-none py-1 text-sm text-gray-600 placeholder:text-gray-300 transition"
+                />
+                {metaDesc.length > 0 && (
+                  <button
+                    id="btn-desc-clear"
+                    type="button"
+                    onClick={() => setMetaDesc('')}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 p-1 text-gray-300 hover:text-red-600 transition"
+                    title="Hapus deskripsi"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              {(() => {
+                const len = metaDesc.length;
+                const max = 160;
+                const color = len > max ? 'text-red-600' : len > max * 0.9 ? 'text-amber-500' : 'text-gray-400';
+                return (
+                  <div className={`text-[10px] mt-1.5 h-4 ${color}`} aria-live="polite">
+                    {len}/{max} karakter
+                  </div>
+                );
+              })()}
             </div>
           </div>
+        </section>
 
+        {/* Row 1 Col 2: Skor Sampingan */}
+        <section id="score-panel" className={`${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 min-h-0 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden`}>
+          <div className="h-1 bg-gradient-to-r from-red-700 to-red-400" />
+          <div className="p-5">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-gray-900">Live score</h2>
+                {report && (
+                  <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusConfig?.bg} ${statusConfig?.color} ${statusConfig?.border} border`}>
+                    {statusConfig?.label}
+                  </span>
+                )}
+              </div>
+              {!report && <span className="text-[10px] text-gray-400">Clear priority order for the next edits.</span>}
+            </div>
+
+            {!report ? (
+              /* Empty state */
+              <div className="flex flex-col items-center text-center py-6">
+                <div className="w-24 h-24 mb-4 relative animate-pulse">
+                  <svg className="w-24 h-24 -rotate-90" viewBox="0 0 36 36">
+                    <defs>
+                      <linearGradient id="ringEmpty" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" stopColor="#b91c1c" />
+                        <stop offset="100%" stopColor="#fca5a5" />
+                      </linearGradient>
+                    </defs>
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e5e7eb" strokeWidth="2" strokeDasharray="4 3" />
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke="url(#ringEmpty)" strokeWidth="2" strokeDasharray="20 77.39" strokeLinecap="round" />
+                  </svg>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <Scale className="w-7 h-7 text-gray-300" />
+                  </div>
+                </div>
+                <p className="text-sm font-semibold text-gray-500 mb-1">Belum Ada Skor</p>
+                <p className="text-[11px] text-gray-400 leading-relaxed mb-3">Klik <strong className="text-red-600 font-semibold">Periksa</strong> untuk menjalankan evaluasi</p>
+                <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                  <div className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+                  Menunggu evaluasi
+                </div>
+              </div>
+            ) : aiLoading ? (
+              /* Loading state */
+              <div className="flex items-start gap-5 mb-4">
+                <div className="relative w-24 h-24 shrink-0">
+                  <svg className="w-24 h-24 -rotate-90 animate-spin" style={{ animationDuration: '2s' }} viewBox="0 0 36 36">
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke="#b91c1c" strokeWidth="3" strokeDasharray="48 97.39" strokeLinecap="round" />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <Loader className="w-5 h-5 text-red-600 animate-spin" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 flex-1 min-w-0">
+                  {['SEO', 'Structure', 'Intent', 'Tone'].map((label) => (
+                    <div key={label} className="flex flex-col items-center justify-center p-2 bg-gray-50 rounded-lg border border-gray-100">
+                      <div className="w-6 h-5 bg-gray-200 rounded animate-pulse mb-1" />
+                      <span className="text-[9px] text-gray-300 font-medium">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              /* Ring chart + Sub-scores side by side */
+              <div className="flex items-start gap-5 mb-4">
+                {/* Ring chart */}
+                <div className="relative w-24 h-24 shrink-0">
+                  <svg className="w-24 h-24 -rotate-90" viewBox="0 0 36 36">
+                    <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                    <circle cx="18" cy="18" r="15.5" fill="none"
+                      stroke={score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444'}
+                      strokeWidth="3" strokeDasharray={`${(score / 100) * 97.39} 97.39`}
+                      strokeLinecap="round" />
+                  </svg>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className={`text-xl font-bold leading-none ${statusConfig?.color}`}>{score}</span>
+                    <span className="text-[9px] text-gray-400 mt-0.5">of 100</span>
+                  </div>
+                </div>
+                {/* Sub-scores */}
+                <div className="grid grid-cols-2 gap-2 flex-1 min-w-0">
+                  {([
+                    { label: 'SEO', value: aiResults?.subScores?.seo || 0 },
+                    { label: 'Structure', value: aiResults?.subScores?.structure || 0 },
+                    { label: 'Intent', value: aiResults?.subScores?.intent || 0 },
+                    { label: 'Tone', value: aiResults?.subScores?.tone || 0 },
+                  ] as const).map(({ label, value }) => (
+                    <div key={label} className="flex flex-col items-center justify-center p-2 bg-gray-50 rounded-lg border border-gray-100">
+                      <span className={`text-sm font-bold ${value >= 80 ? 'text-emerald-600' : value >= 60 ? 'text-amber-600' : 'text-red-500'}`}>{value}</span>
+                      <span className="text-[9px] text-gray-500 font-medium">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Best next move */}
+            {aiResults?.bestNextMove && (
+              <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Sparkles className="w-3 h-3 text-red-500" />
+                  <span className="text-[10px] font-semibold text-red-700">Best next move</span>
+                </div>
+                <p className="text-[11px] text-red-800 leading-relaxed">{aiResults.bestNextMove}</p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Row 2 Col 1: Article Editor */}
+        <section id="editor-area" className={`${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col h-full min-w-0 min-h-0 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden relative`}>
+          <div className="h-1 bg-gradient-to-r from-red-700 to-red-400 shrink-0" />
           {/* Toolbar */}
-          <div className="px-3 md:px-10 py-2 flex flex-wrap items-center gap-0.5 md:gap-1 border-b border-slate-50">
+          <div className="px-4 md:px-8 py-2.5 flex flex-nowrap md:flex-wrap overflow-x-auto md:overflow-visible items-center gap-0.5 md:gap-1 border-b border-gray-100 bg-white scrollbar-hide">
             {[
               { icon: Heading1, action: 'h1', label: 'H1' },
               { icon: Heading2, action: 'h2', label: 'H2' },
               { icon: Heading3, action: 'h3', label: 'H3' },
             ].map((item) => (
               <button
+                id={`toolbar-${item.action}`}
                 key={item.action}
                 type="button"
                 onClick={() => handleToolbar(item.action)}
-                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-600 hover:text-red-700 transition"
                 title={item.label}
               >
                 <item.icon className="w-4 h-4" />
               </button>
             ))}
-            <div className="w-px h-4 bg-slate-100 mx-1" />
+            <div className="w-px h-5 bg-gray-200 mx-1" />
             {[
               { icon: Bold, action: 'bold', label: 'Bold' },
               { icon: Italic, action: 'italic', label: 'Italic' },
               { icon: Underline, action: 'underline', label: 'Underline' },
             ].map((item) => (
               <button
+                id={`toolbar-${item.action}`}
                 key={item.action}
                 type="button"
                 onClick={() => handleToolbar(item.action)}
-                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-600 hover:text-red-700 transition"
                 title={item.label}
               >
                 <item.icon className="w-4 h-4" />
               </button>
             ))}
-            <div className="w-px h-4 bg-slate-100 mx-1" />
+            <div className="w-px h-5 bg-gray-200 mx-1 hidden md:block" />
+            <div className="hidden md:flex items-center gap-0.5 md:gap-1">
+              {[
+                { icon: AlignLeft, action: 'align-left', label: 'Rata Kiri' },
+                { icon: AlignCenter, action: 'align-center', label: 'Rata Tengah' },
+                { icon: AlignRight, action: 'align-right', label: 'Rata Kanan' },
+                { icon: AlignJustify, action: 'align-justify', label: 'Rata Kiri-Kanan' },
+              ].map((item) => (
+                <button
+                  id={`toolbar-${item.action}`}
+                  key={item.action}
+                  type="button"
+                  onClick={() => handleToolbar(item.action)}
+                  className="p-2 rounded-lg hover:bg-gray-100 text-gray-600 hover:text-red-700 transition"
+                  title={item.label}
+                >
+                  <item.icon className="w-4 h-4" />
+                </button>
+              ))}
+              <div className="w-px h-5 bg-gray-200 mx-1" />
+            </div>
             {[
               { icon: List, action: 'bullet', label: 'Bullet' },
               { icon: ListOrdered, action: 'number', label: 'Numbering' },
@@ -1266,6 +1959,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               { icon: ImageIcon, action: 'image', label: 'Gambar' },
             ].map((item) => (
               <button
+                id={`toolbar-${item.action}`}
                 key={item.action}
                 type="button"
                 onClick={() => {
@@ -1275,13 +1969,14 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                     handleToolbar(item.action);
                   }
                 }}
-                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-500 transition"
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-600 hover:text-red-700 transition"
                 title={item.label}
               >
                 <item.icon className="w-4 h-4" />
               </button>
             ))}
             <input
+              id="image-input"
               type="file"
               accept="image/*"
               ref={imageInputRef}
@@ -1291,29 +1986,32 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             <div className="flex-1" />
             <div className="flex items-center gap-0.5 mr-3">
               <button
+                id="toolbar-undo"
                 type="button"
                 onClick={handleUndo}
                 disabled={undoStackRef.current.length === 0}
-                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition"
                 title="Undo (Ctrl+Z)"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
               <button
+                id="toolbar-redo"
                 type="button"
                 onClick={handleRedo}
                 disabled={redoStackRef.current.length === 0}
-                className="p-1.5 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                className="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed transition"
                 title="Redo (Ctrl+Y)"
               >
                 <RotateCcw className="w-3.5 h-3.5 scale-x-[-1]" />
               </button>
             </div>
-            <div className="text-xs text-slate-400">{wordCount} kata</div>
+            <div id="toolbar-wordcount" className="text-xs font-medium text-gray-400 bg-gray-100 px-2 py-1 rounded-md">{wordCount} kata</div>
           </div>
 
           {/* WYSIWYG Editor */}
           <div
+            id="editor-wrapper"
             ref={editorWrapperRef}
             data-editor-wrapper
             className="flex-1 relative overflow-auto min-h-0 px-4 md:px-10 py-6 md:py-8"
@@ -1331,19 +2029,20 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             onMouseLeave={() => { clearTimeout(hideTimeoutRef.current); hoverTargetRef.current = null; setHover(null); }}
           >
             <div
+              id="editor-surface"
               ref={editorRef}
               contentEditable
               suppressContentEditableWarning
               onInput={handleEditorInput}
               onPaste={handleEditorPaste}
               onClick={handleEditorClick}
-              className="editor-surface w-full h-full outline-none text-base leading-7 text-slate-800 empty:before:content-[attr(data-placeholder)] empty:before:text-slate-300 empty:before:pointer-events-none"
+              className="editor-surface w-full h-full outline-none text-base leading-7 text-gray-800 empty:before:content-[attr(data-placeholder)] empty:before:text-gray-300 empty:before:pointer-events-none"
               data-placeholder="Mulai menulis artikel Anda di sini..."
               spellCheck={false}
             />
             {flashText && (
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                <div className="px-3 py-1.5 bg-slate-900 text-white text-xs rounded-full shadow-lg animate-fade-up">
+                <div className="px-3 py-1.5 bg-gray-800 text-white text-xs rounded-full shadow-lg animate-fade-up">
                   Fokus: {flashText.slice(0, 40)}...
                 </div>
               </div>
@@ -1352,47 +2051,51 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               const passed = hover.issue.status === 'passed';
               return (
               <div
-                className="issue-popup fixed z-[100] w-72 bg-white border border-slate-100 shadow-xl rounded-xl p-4 animate-fade-up"
+                id="issue-popup"
+                className="issue-popup fixed z-[100] w-72 bg-white border border-gray-200 shadow-xl rounded-xl p-4 animate-fade-up"
                 style={{ left: hover.x, top: hover.y, transform: 'translateX(-50%)' }}
                 onMouseEnter={() => clearTimeout(hideTimeoutRef.current)}
                 onMouseLeave={scheduleHide}
               >
-                <div className="flex items-start gap-2 mb-2">
+                <div id="issue-popup-header" className="flex items-start gap-2 mb-2">
                   {passed
                     ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" />
                     : <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
-                  <h4 className="text-sm font-semibold text-slate-900 leading-tight">{hover.issue.question}</h4>
+                  <h4 id="issue-popup-title" className="text-sm font-semibold text-gray-900 leading-tight">{hover.issue.question}</h4>
                 </div>
-                <p className="text-xs text-slate-600 leading-relaxed mb-3">{hover.issue.reason}</p>
+                <p id="issue-popup-reason" className="text-xs text-gray-600 leading-relaxed mb-3">{hover.issue.reason}</p>
                 {!passed && (
-                  <div className="bg-slate-50 rounded-lg p-2.5 text-[11px] text-slate-500">
-                    <div className="font-semibold text-slate-700 mb-1">SOP</div>
+                  <div id="issue-popup-sop" className="bg-gray-50 rounded-lg p-2.5 text-[11px] text-gray-600">
+                    <div className="font-semibold text-gray-800 mb-1">SOP</div>
                     {SUGGESTED_LABELS[hover.issue.id] || 'Periksa kembali bagian ini sesuai SOP.'}
                   </div>
                 )}
-                <div className="mt-3 flex items-center justify-between">
+                <div id="issue-popup-actions" className="mt-3 flex items-center justify-between">
                   {!passed && hover.issue.id === 56 ? (
                     <button
+                      id="issue-popup-autocorrect-case"
                       type="button"
                       onClick={() => handleAutoCorrectCase(hover.issue)}
-                      className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-wait transition"
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-red-700 text-white hover:bg-red-800 disabled:opacity-50 disabled:cursor-wait transition"
                     >
                       Auto Correct
                     </button>
                   ) : !passed && (
                     <button
+                      id="issue-popup-autocorrect"
                       type="button"
                       disabled={fixingId === hover.issue.id}
                       onClick={() => handleAutoCorrect(hover.issue)}
-                      className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-wait transition"
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-red-700 text-white hover:bg-red-800 disabled:opacity-50 disabled:cursor-wait transition"
                     >
                       {fixingId === hover.issue.id ? 'Memperbaiki...' : 'Auto Correct'}
                     </button>
                   )}
                   <button
+                    id="issue-popup-focus"
                     type="button"
                     onClick={() => focusIssue(hover.issue)}
-                    className="text-[11px] px-2.5 py-1 rounded-md bg-slate-900 text-white hover:bg-slate-800"
+                    className="text-[11px] px-2.5 py-1 rounded-md bg-gray-800 text-white hover:bg-gray-700"
                   >
                     Fokus
                   </button>
@@ -1403,34 +2106,62 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             {selectedImgInfo && (() => {
               const align = selectedImgInfo.align;
               return (
-              <div
-                className="fixed z-[100] bg-white border border-slate-100 shadow-xl rounded-xl p-2 animate-fade-up flex items-center gap-1.5"
-                style={{ left: selectedImgInfo.x, top: selectedImgInfo.y, transform: 'translateX(-50%)' }}
-                onMouseDown={(e) => e.preventDefault()}
-              >
-                <input
-                  type="range"
+                <div
+                  id="image-toolbar"
+                  ref={imgToolbarRef}
+                  className="fixed z-[100] bg-white border border-gray-200 shadow-xl rounded-xl p-2.5 animate-fade-up flex items-center gap-2"
+                  style={{ left: selectedImgInfo.x, top: selectedImgInfo.y, transform: 'translateX(-50%)', touchAction: 'pan-y' }}
+                >
+                  <input
+                    id="image-toolbar-width-slider"
+                    type="range"
                   min="100"
                   max={selectedImgInfo.maxWidth}
                   value={selectedImgInfo.width}
+                  style={{ touchAction: 'none' }}
                   onChange={(e) => {
                     const v = parseInt(e.target.value);
                     setSelectedImgInfo({ ...selectedImgInfo, width: v });
                     const img = selectedImgRef.current;
-                    if (img) { img.style.width = Math.min(v, selectedImgInfo.maxWidth) + 'px'; syncFromEditor(); }
+                    if (img) {
+                      const clamped = Math.min(v, selectedImgInfo.maxWidth);
+                      img.style.width = clamped + 'px';
+                      img.setAttribute('width', String(clamped));
+                      syncFromEditor();
+                    }
                   }}
-                  className="w-20 h-1.5"
+                  className="w-32 h-2 range-slider"
                 />
-                <span className="text-[10px] text-slate-400 w-8 text-right">{selectedImgInfo.width}</span>
-                <div className="w-px h-4 bg-slate-100 mx-0.5" />
+                  <input
+                    id="image-toolbar-width-number"
+                    type="number"
+                  min={100}
+                  max={selectedImgInfo.maxWidth}
+                  value={selectedImgInfo.width}
+                  onChange={(e) => {
+                    let v = parseInt(e.target.value) || 100;
+                    v = Math.max(100, Math.min(v, selectedImgInfo.maxWidth));
+                    setSelectedImgInfo({ ...selectedImgInfo, width: v });
+                    const img = selectedImgRef.current;
+                    if (img) {
+                      img.style.width = v + 'px';
+                      img.setAttribute('width', String(v));
+                      syncFromEditor();
+                    }
+                  }}
+                  className="w-14 text-[11px] text-gray-600 border border-gray-200 rounded-md px-1.5 py-1 text-center focus:outline-none focus:border-red-400"
+                />
+                <div className="w-px h-4 bg-gray-200 mx-0.5" />
                 {['inline', 'center', 'right'].map((a) => (
                   <button
+                    id={`image-toolbar-align-${a}`}
                     key={a}
                     type="button"
                     onClick={() => {
                       setSelectedImgInfo({ ...selectedImgInfo, align: a });
                       const img = selectedImgRef.current;
                       if (!img) return;
+                      img.setAttribute('data-align', a);
                       if (a === 'inline') {
                         img.style.display = '';
                         img.style.marginLeft = '';
@@ -1446,14 +2177,15 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       }
                       syncFromEditor();
                     }}
-                    className={`p-1 rounded text-[10px] font-medium leading-none transition ${align === a ? 'bg-slate-900 text-white' : 'text-slate-400 hover:text-slate-600'}`}
-                    title={a === 'inline' ? 'Inline' : a === 'center' ? 'Tengah' : 'Kanan'}
+                    className={`p-1.5 rounded-md transition ${align === a ? 'bg-red-700 text-white' : 'text-gray-400 hover:text-gray-700 hover:bg-gray-100'}`}
+                    title={a === 'inline' ? 'Rata Kiri' : a === 'center' ? 'Rata Tengah' : 'Rata Kanan'}
                   >
-                    {a === 'inline' ? '≡' : a === 'center' ? '⊞' : '⊟'}
+                    {a === 'inline' ? <AlignLeft className="w-3.5 h-3.5" /> : a === 'center' ? <AlignCenter className="w-3.5 h-3.5" /> : <AlignRight className="w-3.5 h-3.5" />}
                   </button>
                 ))}
-                <div className="w-px h-4 bg-slate-100 mx-0.5" />
+                <div className="w-px h-4 bg-gray-200 mx-0.5" />
                 <button
+                  id="image-toolbar-delete"
                   type="button"
                   onClick={deleteSelectedImg}
                   className="p-1 rounded text-[10px] font-medium leading-none text-red-400 hover:text-red-600 hover:bg-red-50 transition"
@@ -1467,31 +2199,45 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           </div>
 
           {/* Chatbot */}
-          <div className="absolute bottom-6 right-4 z-[100] flex flex-col items-end gap-3">
+          <div id="chatbot-container" className="absolute bottom-6 right-4 z-[100] flex flex-col items-end gap-3">
           {chatOpen && (
-            <div ref={chatRef} className="w-80 sm:w-96 h-96 bg-white border border-slate-100 shadow-2xl rounded-2xl flex flex-col overflow-hidden animate-fade-up">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-50 bg-slate-50/50">
-                <span className="text-sm font-semibold text-slate-700">Asisten Artikel</span>
-                <button type="button" onClick={() => setChatOpen(false)} className="text-slate-300 hover:text-slate-500 transition text-lg leading-none">&times;</button>
+            <div id="chat-panel" ref={chatRef} className="w-80 sm:w-96 h-96 bg-white border border-gray-200 shadow-2xl rounded-2xl flex flex-col overflow-hidden animate-fade-up">
+              <div id="chat-header" className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
+                <span id="chat-title" className="text-sm font-semibold text-gray-800">Asisten Artikel</span>
+                <div id="chat-header-actions" className="flex items-center gap-1">
+                  {chatMessages.length > 0 && (
+                    <button
+                      id="chat-btn-clear"
+                      type="button"
+                      onClick={() => setChatMessages([])}
+                      className="text-gray-400 hover:text-red-600 transition p-1 leading-none"
+                      title="Hapus riwayat chat"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button id="chat-btn-close" type="button" onClick={() => setChatOpen(false)} className="text-gray-300 hover:text-gray-500 transition text-lg leading-none">×</button>
+                </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+              <div id="chat-messages" className="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
                 {chatMessages.length === 0 && (
-                  <div className="text-slate-400 text-center py-8">
-                    <p className="font-medium text-slate-500 mb-1">Tanya Asisten Artikel</p>
+                  <div id="chat-welcome" className="text-gray-400 text-center py-8">
+                    <p className="font-medium text-gray-500 mb-1">Tanya Asisten Artikel</p>
                     <p className="text-[11px]">Contoh: "perbaiki grammar", "tambah paragraf tentang sanksi hukum", "buat pembukaan lebih profesional"</p>
                   </div>
                 )}
                 {chatMessages.map((m, i) => (
-                  <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[85%] rounded-xl px-3 py-2 leading-relaxed whitespace-pre-wrap ${m.role === 'user' ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-700'}`}>
+                  <div id={`chat-message-${i}`} key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] rounded-xl px-3 py-2 leading-relaxed whitespace-pre-wrap ${m.role === 'user' ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-700'}`}>
                       {m.role === 'assistant' && !m.content.startsWith('⚠️') ? (
                         <div>
                           <span className="line-clamp-6">{m.content}</span>
                           {m.type === 'article' && (
                             <button
+                              id={`chat-btn-apply-${i}`}
                               type="button"
                               onClick={() => setArticleFromMarkdown(m.content)}
-                              className="block mt-1.5 text-[10px] font-medium text-blue-600 hover:text-blue-700"
+                              className="block mt-1.5 text-[10px] font-medium text-red-600 hover:text-red-700"
                             >
                               Terapkan ke artikel &rarr;
                             </button>
@@ -1504,26 +2250,28 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   </div>
                 ))}
                 {chatLoading && (
-                  <div className="flex justify-start">
-                    <div className="bg-slate-50 text-slate-400 rounded-xl px-3 py-2 text-[11px]">Menulis...</div>
+                  <div id="chat-loading" className="flex justify-start">
+                    <div className="bg-gray-100 text-gray-400 rounded-xl px-3 py-2 text-[11px]">Menulis...</div>
                   </div>
                 )}
               </div>
-              <div className="border-t border-slate-50 p-3 flex gap-2">
+              <div id="chat-input-area" className="border-t border-gray-100 p-3 flex gap-2">
                 <input
+                  id="chat-input"
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleChatSend())}
                   placeholder="Tanya asisten..."
                   disabled={chatLoading}
-                  className="flex-1 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-xs outline-none focus:border-slate-300 transition placeholder:text-slate-300 disabled:opacity-50"
+                  className="flex-1 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-xs outline-none focus:border-red-400 transition placeholder:text-gray-300 disabled:opacity-50"
                 />
                 <button
+                  id="chat-btn-send"
                   type="button"
                   onClick={handleChatSend}
                   disabled={chatLoading || !chatInput.trim()}
-                  className="px-3 py-2 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition shrink-0"
+                  className="px-3 py-2 bg-red-700 text-white text-xs font-medium rounded-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shrink-0"
                 >
                   Kirim
                 </button>
@@ -1531,9 +2279,10 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             </div>
           )}
           <button
+            id="chat-btn-toggle"
             type="button"
             onClick={() => setChatOpen(!chatOpen)}
-            className="w-11 h-11 bg-slate-900 text-white rounded-full shadow-lg hover:bg-slate-800 transition flex items-center justify-center"
+            className="w-11 h-11 bg-red-700 text-white rounded-full shadow-lg shadow-red-700/20 hover:bg-red-800 transition flex items-center justify-center"
             title="Buka Asisten Artikel"
           >
             <Bot className="w-5 h-5" />
@@ -1541,20 +2290,25 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </div>
         </section>
 
-        {/* Evaluation Panel */}
-        <aside className={`${showMobileEval ? 'flex' : 'hidden'} md:flex w-full md:w-[30%] min-w-0 bg-slate-50/50 flex-col border-l border-slate-100`}>
-          <div className="p-4 md:p-6 border-b border-slate-100">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-sm font-semibold text-slate-900">Evaluasi Artikel</h2>
+        {/* Row 2 Col 2: Evaluasi Artikel */}
+        <aside id="eval-panel" className={`${showMobileEval ? 'flex' : 'hidden'} md:flex flex-col h-full min-w-0 min-h-0 bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden`}>
+          <div className="h-1 bg-gradient-to-r from-red-700 to-red-400 shrink-0" />
+          <div id="eval-header" className="p-5 border-b border-gray-100">
+            <div className="flex items-center justify-between">
+              <h2 id="eval-title" className="text-sm font-bold text-gray-900">Evaluasi Artikel</h2>
               <button
+                id="btn-periksa"
                 type="button"
                 onClick={runAnalysis}
-                disabled={isAnalyzing || !article.trim()}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 text-white text-xs font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                disabled={isAnalyzing || aiLoading || !article.trim()}
+                className="flex items-center gap-1.5 px-3 py-2 bg-red-700 text-white text-xs font-semibold rounded-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm shadow-red-700/20"
               >
-                {isAnalyzing ? (
+                {isAnalyzing || aiLoading ? (
                   <>
-                    <Loader className="w-3.5 h-3.5 animate-spin" /> Memeriksa...
+                    <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
+                      <circle cx="12" cy="12" r="10" stroke="#ffffff" strokeWidth="3" strokeOpacity="0.3" />
+                      <circle cx="12" cy="12" r="10" stroke="#ffffff" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" />
+                    </svg> Memeriksa...
                   </>
                 ) : (
                   <>
@@ -1563,67 +2317,22 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 )}
               </button>
             </div>
+          </div>
 
+          <div data-eval-panel className="flex-1 overflow-y-auto min-h-0 p-5 pb-20 md:pb-5">
             {!report ? (
-              <div className="text-center py-10 text-slate-400">
-                <div className="w-24 h-24 mx-auto mb-4 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Scale className="w-10 h-10 text-slate-300" />
+              <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center mb-4">
+                  <Target className="w-7 h-7 text-gray-400" />
                 </div>
-                <p className="text-sm font-medium text-slate-500 mb-1">Belum ada evaluasi</p>
-                <p className="text-xs text-slate-400 max-w-48 mx-auto leading-relaxed">
-                  Klik tombol <strong className="text-slate-500">Periksa</strong> untuk menjalankan SOP check dan evaluasi AI pada artikel Anda.
+                <p className="text-sm font-semibold text-gray-500 mb-1">Belum Ada Evaluasi</p>
+                <p className="text-xs text-gray-400 max-w-44 leading-relaxed">
+                  Klik <strong className="text-red-600 font-semibold">Periksa</strong> di atas untuk menjalankan SOP check pada artikel Anda
                 </p>
               </div>
             ) : (
-              <>
-                <div className="flex items-center gap-4 mb-4">
-                  <div className="relative w-16 h-16 shrink-0">
-                    <svg className="w-16 h-16 -rotate-90 score-ring" viewBox="0 0 36 36">
-                      <defs>
-                        <linearGradient id="scoreGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stopColor={score >= 80 ? '#22c55e' : score >= 60 ? '#f59e0b' : '#ef4444'} />
-                          <stop offset="100%" stopColor={score >= 80 ? '#16a34a' : score >= 60 ? '#d97706' : '#dc2626'} />
-                        </linearGradient>
-                      </defs>
-                      <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e2e8f0" strokeWidth="3" />
-                      <circle cx="18" cy="18" r="15.5" fill="none"
-                        stroke="url(#scoreGrad)"
-                        strokeWidth="3" strokeDasharray={`${(score / 100) * 97.39} 97.39`}
-                        strokeLinecap="round" />
-                    </svg>
-                    <span className={`absolute inset-0 flex items-center justify-center text-sm font-bold ${statusConfig?.color}`}>{score}</span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusConfig?.bg} ${statusConfig?.color} ${statusConfig?.border} border mb-1`}>
-                      {statusConfig?.label === 'Layak Publish' ? (
-                        <CheckCircle2 className="w-3 h-3" />
-                      ) : (
-                        <AlertCircle className="w-3 h-3" />
-                      )}
-                      {statusConfig?.label}
-                    </div>
-                    <p className="text-[11px] text-slate-500 leading-snug">{statusConfig?.desc}</p>
-                    <p className="text-[10px] text-slate-400 mt-0.5">
-                      {report.items.filter((i) => i.status === 'passed').length}/{report.items.length} kriteria lulus
-                    </p>
-                  </div>
-                </div>
-
-                <div className="bg-gradient-to-br from-slate-50 to-white border border-slate-100 rounded-xl px-4 py-3 shadow-sm">
-                  <h3 className="text-[11px] font-semibold text-slate-900 mb-1 flex items-center gap-1.5">
-                    <span className="w-1 h-3.5 bg-slate-400 rounded-full inline-block" />
-                    Ringkasan
-                  </h3>
-                  <p className="text-[11px] text-slate-600 leading-relaxed">{generateSummary(report)}</p>
-                </div>
-              </>
-            )}
-          </div>
-
-          <div data-eval-panel className="flex-1 overflow-y-auto min-h-0 p-4 md:p-6 pb-20 md:pb-6">
-            {report && (
               <div className="space-y-1.5">
-                <h3 className="text-xs font-semibold text-slate-900 mb-3">Daftar Issue</h3>
+                <h3 className="text-xs font-bold text-gray-900 mb-3">Daftar Issue</h3>
                 {(() => {
                   const a: typeof CATEGORIES = [];
                   const b: typeof CATEGORIES = [];
@@ -1642,37 +2351,32 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                     const st = getCategoryStatus(report, cat.id);
                     const isPassed = st === 'passed';
                     const I = isPassed ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
-                    const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-slate-400' : 'text-red-500';
-                    const borderAccent = isPassed ? 'border-l-emerald-300' : st === 'deferred' ? 'border-l-slate-300' : 'border-l-red-300';
-                    // For passed categories, get the first item to show its reason
+                    const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-gray-400' : 'text-red-500';
                     const itemForReason = iss || report.items.find((item) => cat.checks.includes(item.id));
                     return (
                       <button key={cat.id} type="button" onClick={() => clickable && iss && focusIssue(iss)} disabled={!clickable}
-                        className={`w-full flex items-center gap-3 p-3 rounded-xl border border-l-2 transition text-left ${borderAccent} ${clickable && !isPassed ? 'bg-white border-slate-100 card-hover cursor-pointer' : isPassed ? 'bg-slate-50/40 border-slate-50 cursor-default' : 'bg-slate-50/60 border-transparent cursor-default'}`}>
-                        <span className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${isPassed ? 'bg-emerald-50' : st === 'deferred' ? 'bg-slate-50' : 'bg-red-50'}`}>
-                          <I className={`w-3.5 h-3.5 ${co}`} />
-                        </span>
+                        className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border transition text-left group ${clickable && !isPassed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : isPassed ? 'bg-gray-50/50 border-gray-100 cursor-default' : 'bg-gray-50/60 border-transparent cursor-default'}`}>
+                        <I className={`w-4 h-4 shrink-0 ${co}`} />
                         <div className="flex-1 min-w-0">
-                          <div className={`text-xs font-medium ${isPassed ? 'text-slate-600' : 'text-slate-800'}`}>{cat.label}</div>
-                          {itemForReason && <div className="text-[10px] text-slate-500 leading-relaxed mt-0.5">{itemForReason.reason}</div>}
+                          <div className={`text-xs font-medium ${isPassed ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
+                          {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">{itemForReason.reason}</div>}
                         </div>
-                        {clickable && !isPassed && <span className="text-[9px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0">Klik</span>}
-                        {isPassed && <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />}
+                        {isPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
                       </button>
                     );
                   };
                   return (
                     <>
-                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
-                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
+                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
+                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
                       {c.length > 0 && (
-                        <div className="mt-4 pt-3 border-t border-slate-50">
+                        <div className="mt-4 pt-3 border-t border-gray-100">
                           <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
-                            className="flex items-center gap-2 text-[10px] font-medium text-slate-400 hover:text-slate-600 transition px-0.5"
+                            className="flex items-center gap-2 text-[10px] font-medium text-gray-400 hover:text-gray-600 transition px-0.5"
                           >
                             <span className={`inline-block transition-transform ${showPassedIssues ? 'rotate-90' : ''}`}>▶</span>
                             {showPassedIssues ? 'Sembunyikan' : 'Lihat'}{' '}
-                            <span className="text-slate-400">{c.length} kategori lulus</span>
+                            <span className="text-gray-400">{c.length} kategori lulus</span>
                           </button>
                           {showPassedIssues && (
                             <div className="mt-1.5 space-y-1">
@@ -1687,48 +2391,40 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               </div>
             )}
 
-            <div className="mt-6 pt-5 border-t border-slate-100">
-              <h3 className="text-xs font-semibold text-slate-900 mb-3 flex items-center gap-1.5">
-                <BrainCircuit className="w-3.5 h-3.5 text-slate-600" /> AI Evaluation
+            <div className="mt-6 pt-5 border-t border-gray-200">
+              <h3 className="text-xs font-bold text-gray-900 mb-3 flex items-center gap-1.5">
+                <BrainCircuit className="w-3.5 h-3.5 text-gray-600" /> AI Evaluation
               </h3>
 
               {aiLoading && (
-                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-white border border-slate-100">
-                  <Loader className="w-4 h-4 text-slate-400 animate-spin" />
-                  <span className="text-xs text-slate-500">Menganalisis artikel dengan AI...</span>
+                <div className="flex items-center gap-3 p-4 rounded-xl bg-gradient-to-r from-red-50 to-white border border-red-100">
+                  <div className="relative w-6 h-6 shrink-0">
+                    <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24" fill="none" style={{ animationDuration: '0.8s' }}>
+                      <circle cx="12" cy="12" r="10" stroke="#e5e7eb" strokeWidth="3" />
+                      <circle cx="12" cy="12" r="10" stroke="#b91c1c" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" />
+                    </svg>
+                  </div>
+                  <span className="text-xs font-medium text-red-800">Menganalisis artikel dengan AI...</span>
                 </div>
               )}
 
-              {!aiLoading && !aiResults && !report && (
-                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-white border border-slate-100 opacity-70">
-                  <BrainCircuit className="w-4 h-4 text-slate-400" />
-                  <span className="text-xs text-slate-400">Klik <strong>Periksa</strong> untuk evaluasi AI</span>
+              {!aiLoading && !aiResults && (
+                <div className="flex flex-col items-center gap-3 py-8 text-center">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center">
+                    <BrainCircuit className="w-5 h-5 text-gray-400" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-gray-500 mb-0.5">Analisis AI</p>
+                    <p className="text-[10px] text-gray-400 leading-relaxed">Klik <strong className="text-red-600 font-semibold">Periksa</strong> untuk hasil</p>
+                  </div>
                 </div>
               )}
 
-              {!aiLoading && aiResults && aiResults.length > 0 && (() => {
-                const avgScore = Math.round(aiResults.reduce((s, r) => s + (r.aiConfidence || 0), 0) / aiResults.length);
-                const passCount = aiResults.filter((r) => r.status === 'passed').length;
+              {!aiLoading && aiResults && aiResults.results.length > 0 && (() => {
                 return (
                   <>
-                    <div className="flex items-center gap-3 mb-3 px-0.5">
-                      <div className="flex items-center gap-1.5 text-[11px] text-emerald-600 font-medium">
-                        <CheckCircle2 className="w-3 h-3" />
-                        {passCount} lulus
-                      </div>
-                      <span className="text-slate-300">|</span>
-                      <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
-                        <BrainCircuit className="w-3 h-3" />
-                        Skor {avgScore}
-                      </div>
-                      <span className="text-slate-300">|</span>
-                      <div className="flex items-center gap-1.5 text-[11px] text-slate-500">
-                        <Target className="w-3 h-3" />
-                        {aiResults.length} kriteria
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      {aiResults.map((r, idx) => {
+                    <div className="space-y-1.5">
+                      {aiResults.results.map((r) => {
                         const score = r.aiConfidence || 0;
                         const passed = r.status === 'passed';
                         const hasText = !!r.problematic_text?.trim();
@@ -1736,31 +2432,27 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         const cardProps = hasText && !passed ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
                         return (
                           <Card key={r.id} {...cardProps}
-                            className={`w-full flex flex-col p-3.5 rounded-xl border text-left transition animate-slide-up eval-card ${hasText && !passed ? 'bg-white border-slate-100 hover:border-slate-200 cursor-pointer group border-l-2 border-l-amber-400' : 'bg-gradient-to-br from-emerald-50/60 to-white border-emerald-100 border-l-2 border-l-emerald-300'}`}
-                            style={{ animationDelay: `${idx * 50}ms` }}
+                            className={`w-full flex flex-col p-3 rounded-xl border text-left transition group ${hasText && !passed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : 'bg-white border-gray-100'}`}
                           >
                             <div className="flex items-start gap-2.5">
-                              <span className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${passed ? 'bg-emerald-100' : 'bg-amber-100'}`}>
-                                {passed ? (
-                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                                ) : (
-                                  <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
-                                )}
-                              </span>
+                              {passed ? (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                              )}
                               <div className="flex-1 min-w-0">
-                                <div className="text-[11px] font-medium text-slate-800 mb-1 leading-snug">{r.question}</div>
-                                <div className="text-[10px] text-slate-500 leading-relaxed">{r.reason || '-'}</div>
+                                <div className="text-[11px] font-medium text-gray-800 mb-0.5 leading-snug">{r.question}</div>
+                                <div className="text-[10px] text-gray-500 leading-snug">{r.reason || '-'}</div>
                                 {hasText && (
-                                  <div className="mt-1.5 text-[10px] text-slate-400 italic bg-slate-50 border border-slate-100 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
+                                  <div className="mt-1 text-[10px] text-gray-400 bg-gray-50 border border-gray-200 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
                                 )}
                               </div>
-                              <div className="flex flex-col items-center gap-1 shrink-0 min-w-[28px]">
-                                <span className={`text-[11px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
-                                {hasText && !passed && <span className="text-[7px] font-medium text-slate-400 bg-slate-100 px-1 py-0.5 rounded opacity-0 group-hover:opacity-100 transition">Klik</span>}
+                              <div className="flex flex-col items-center gap-1 shrink-0 min-w-[24px]">
+                                <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
                               </div>
                             </div>
-                            <div className="mt-2.5 w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full transition-all duration-700 ${passed ? 'bg-gradient-to-r from-emerald-400 to-green-500' : 'bg-gradient-to-r from-amber-400 to-red-400'}`} style={{ width: `${score}%` }} />
+                            <div className="mt-2 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
                             </div>
                           </Card>
                         );
@@ -1770,36 +2462,45 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 );
               })()}
 
-              {!aiLoading && aiResults && aiResults.length === 0 && (
-                <div className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-100">
-                  <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
-                  <span className="text-[11px] text-amber-700 leading-relaxed">Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.</span>
+              {!aiLoading && aiResults && aiResults.results.length === 0 && (
+                <div className={`flex items-center gap-2.5 p-3 rounded-xl border ${aiError ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
+                  {aiError ? (
+                    <>
+                      <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                      <span className="text-[11px] text-red-700 leading-relaxed">{aiError || 'Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                      <span className="text-[11px] text-emerald-700 leading-relaxed">AI tidak menemukan masalah pada artikel ini.</span>
+                    </>
+                  )}
                 </div>
               )}
             </div>
 
             {aiResults && (() => {
-              const caseIssues = aiResults.filter((r) => r.id === 56 && r.status === 'failed' && r.problematic_text?.trim());
+              const caseIssues = aiResults.results.filter((r) => r.id === 56 && r.status === 'failed' && r.problematic_text?.trim());
               if (caseIssues.length === 0) return null;
               return (
-              <div className="mt-5 pt-4 border-t border-slate-100">
-                <h3 className="text-xs font-semibold text-slate-700 mb-3 flex items-center gap-1.5">
-                  <span className="text-[10px] font-bold tracking-tight text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">Aa</span> Rekomendasi Kapitalisasi
+              <div className="mt-5 pt-4 border-t border-gray-200">
+                <h3 className="text-xs font-bold text-gray-700 mb-3 flex items-center gap-1.5">
+                  <span className="text-[10px] font-bold tracking-tight text-gray-400 bg-gray-200 px-1.5 py-0.5 rounded">Aa</span> Rekomendasi Kapitalisasi
                 </h3>
-                <div className="text-[10px] text-slate-400 mb-3 leading-relaxed">
+                <div className="text-[10px] text-gray-400 mb-3 leading-relaxed">
                   Klik item untuk lokasi kata. Klik <strong>Auto Correct</strong> di popup untuk perbaiki kapitalisasi.
                 </div>
                 <div className="space-y-1">
                   {caseIssues.map((r, i) => (
                     <button key={i} type="button" onClick={() => focusIssue(r)}
-                      className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-slate-100 bg-white hover:border-slate-200 hover:bg-slate-50 transition text-left cursor-pointer group"
+                      className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50 transition text-left cursor-pointer group"
                     >
-                      <span className="text-[9px] font-bold text-slate-400 mt-0.5 shrink-0 w-4 text-center">Aa</span>
+                      <span className="text-[9px] font-bold text-gray-400 mt-0.5 shrink-0 w-4 text-center">Aa</span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-[11px] text-slate-700 font-medium leading-snug">{r.reason}</div>
-                        <div className="text-[10px] text-slate-400 mt-0.5 italic truncate">"{r.problematic_text}"</div>
+                        <div className="text-[11px] text-gray-700 font-medium leading-snug">{r.reason}</div>
+                        <div className="text-[10px] text-gray-400 mt-0.5 italic truncate">"{r.problematic_text}"</div>
                       </div>
-                      <span className="text-[8px] font-medium text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition">Klik</span>
+                      <span className="text-[8px] font-medium text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition">Klik</span>
                     </button>
                   ))}
                 </div>
@@ -1810,8 +2511,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </aside>
 
         {/* Mobile toggle button */}
-        <button type="button" onClick={() => setShowMobileEval((v) => !v)}
-          className="md:hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-5 py-2.5 bg-slate-900 text-white text-xs font-medium rounded-full shadow-lg hover:bg-slate-800 transition shadow-slate-900/20"
+        <button id="mobile-toggle" type="button" onClick={() => setShowMobileEval((v) => !v)}
+          className="md:hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-5 py-2.5 bg-red-700 text-white text-xs font-semibold rounded-full shadow-lg hover:bg-red-800 transition shadow-red-700/20"
         >
           {showMobileEval ? (
             <><RotateCcw className="w-3.5 h-3.5" /> Kembali ke Editor</>
@@ -1822,26 +2523,198 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
       </main>
 
       {showKwPopup && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setShowKwPopup(false)}>
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-4">
+        <div id="kw-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => setShowKwPopup(false)}>
+          <div
+            id="kw-modal"
+            className="bg-white rounded-2xl shadow-xl border border-gray-200 w-full max-w-2xl max-h-[85vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-5 border-b border-gray-200">
               <div className="flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-slate-500" />
-                <span className="text-sm font-semibold text-slate-800">Generate Keyword dengan AI</span>
+                <Sparkles className="w-5 h-5 text-red-600" />
+                <span id="kw-modal-title" className="text-sm font-bold text-gray-900">Generate Keyword dengan AI</span>
               </div>
-              <button type="button" onClick={() => setShowKwPopup(false)} className="text-slate-300 hover:text-slate-500 transition text-lg leading-none">&times;</button>
+              <button id="kw-modal-close" type="button" onClick={() => setShowKwPopup(false)} className="text-gray-300 hover:text-gray-500 transition text-2xl leading-none">×</button>
             </div>
-            {kwGenError && <div className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{kwGenError}</div>}
-            <p className="text-xs text-slate-500 mb-4 leading-relaxed">AI akan membaca seluruh artikel dan menyarankan 1 keyword utama (2–4 kata) yang paling relevan dengan topik.</p>
-            <button
-              type="button"
-              onClick={handleGenerateKeyword}
-              disabled={kwGenLoading}
-              className="w-full py-2.5 rounded-xl text-sm font-medium text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
-            >
-              {kwGenLoading ? <Loader className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              {kwGenLoading ? 'Menganalisis artikel...' : 'Generate Keyword'}
-            </button>
+
+            <div className="p-5 overflow-y-auto flex-1 min-h-0">
+              {kwGenError && (
+                <div id="kw-modal-error" className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{kwGenError}</div>
+              )}
+
+              {kwSuggestions.length === 0 ? (
+                <div className="text-center py-6">
+                  <p id="kw-modal-desc" className="text-xs text-gray-500 mb-5 leading-relaxed">
+                    AI akan membaca seluruh artikel dan menyarankan 100+ keyword/keyword LSI yang relevan dengan topik.
+                    Anda bisa memilih beberapa keyword sekaligus.
+                  </p>
+                  <button
+                    id="kw-modal-generate"
+                    type="button"
+                    onClick={handleGenerateKeyword}
+                    disabled={kwGenLoading}
+                    className="w-full max-w-sm mx-auto py-2.5 rounded-xl text-sm font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2 shadow-sm shadow-red-700/20"
+                  >
+                    {kwGenLoading ? <Loader className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                    {kwGenLoading ? 'Menganalisis artikel...' : 'Generate Keyword'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                      <input
+                        id="kw-modal-search"
+                        type="text"
+                        value={kwSearch}
+                        onChange={(e) => setKwSearch(e.target.value)}
+                        placeholder="Cari keyword..."
+                        className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-200"
+                      />
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        id="kw-modal-select-all"
+                        type="button"
+                        onClick={selectAllKeywords}
+                        className="px-3 py-2 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
+                      >
+                        Pilih semua
+                      </button>
+                      <button
+                        id="kw-modal-deselect-all"
+                        type="button"
+                        onClick={deselectAllKeywords}
+                        className="px-3 py-2 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
+                      >
+                        Batal pilih
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-gray-500">
+                    Menampilkan {filteredKeywords.length} dari {kwSuggestions.length} keyword · {selectedKeywords.size} dipilih
+                  </p>
+
+                  <div className="border border-gray-100 rounded-xl overflow-hidden">
+                    <div className="max-h-[45vh] overflow-y-auto p-1">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                        {filteredKeywords.map((kw) => (
+                          <label
+                            key={kw}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer text-sm text-gray-700 transition"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedKeywords.has(kw)}
+                              onChange={() => toggleKeyword(kw)}
+                              className="w-4 h-4 rounded border-gray-300 text-red-700 focus:ring-red-200"
+                            />
+                            <span className="truncate" title={kw}>{kw}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {kwSuggestions.length > 0 && (
+              <div className="p-5 border-t border-gray-200 flex justify-end gap-2">
+                <button
+                  id="kw-modal-cancel"
+                  type="button"
+                  onClick={() => setShowKwPopup(false)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 transition"
+                >
+                  Batal
+                </button>
+                <button
+                  id="kw-modal-apply"
+                  type="button"
+                  onClick={applySelectedKeywords}
+                  disabled={selectedKeywords.size === 0}
+                  className="px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                >
+                  Terapkan ({selectedKeywords.size})
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showResetModal && (
+        <div id="reset-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setShowResetModal(false)}>
+          <div id="reset-modal" className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm mx-4" onClick={(e) => e.stopPropagation()}>
+            <div id="reset-modal-header" className="flex items-center gap-2 mb-3">
+              <AlertCircle className="w-5 h-5 text-amber-500" />
+              <h3 id="reset-modal-title" className="text-sm font-bold text-gray-900">Reset Artikel</h3>
+            </div>
+            <p id="reset-modal-desc" className="text-xs text-gray-500 mb-5 leading-relaxed">
+              Semua konten artikel, meta data, riwayat chat, dan evaluasi akan dihapus. Draft tersimpan juga akan dihapus. Yakin ingin melanjutkan?
+            </p>
+            <div id="reset-modal-actions" className="flex gap-2">
+              <button
+                id="reset-modal-cancel"
+                type="button"
+                onClick={() => setShowResetModal(false)}
+                className="flex-1 py-2.5 rounded-xl text-xs font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 transition"
+              >
+                Batal
+              </button>
+              <button
+                id="reset-modal-confirm"
+                type="button"
+                onClick={doReset}
+                className="flex-1 py-2.5 rounded-xl text-xs font-semibold text-white bg-red-700 hover:bg-red-800 transition"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showExportModal && (
+        <div id="export-modal-overlay" className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setShowExportModal(false)}>
+          <div id="export-modal" className="bg-white rounded-2xl shadow-xl border border-gray-200 p-6 w-full max-w-sm mx-4" onClick={(e) => e.stopPropagation()}>
+            <div id="export-modal-header" className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Download className="w-5 h-5 text-gray-600" />
+                <h3 id="export-modal-title" className="text-sm font-bold text-gray-900">Export Artikel</h3>
+              </div>
+              <button id="export-modal-close" type="button" onClick={() => setShowExportModal(false)} className="text-gray-300 hover:text-gray-500 transition text-lg leading-none">×</button>
+            </div>
+            <p id="export-modal-desc" className="text-xs text-gray-500 mb-4 leading-relaxed">
+              Pilih format export. Gambar, heading, daftar, dan gaya teks akan dipertahankan.
+            </p>
+            <div id="export-modal-options" className="grid grid-cols-2 gap-3">
+              <button
+                id="export-modal-pdf"
+                type="button"
+                onClick={exportPdf}
+                className="flex flex-col items-center gap-2 p-4 rounded-xl border border-gray-200 hover:border-red-200 hover:bg-red-50 transition"
+              >
+                <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                  <FileText className="w-5 h-5 text-red-600" />
+                </div>
+                <span className="text-xs font-semibold text-gray-700">PDF</span>
+              </button>
+              <button
+                id="export-modal-docx"
+                type="button"
+                onClick={exportDocx}
+                className="flex flex-col items-center gap-2 p-4 rounded-xl border border-gray-200 hover:border-blue-200 hover:bg-blue-50 transition"
+              >
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                  <FileText className="w-5 h-5 text-blue-600" />
+                </div>
+                <span className="text-xs font-semibold text-gray-700">DOCX</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1854,6 +2727,35 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .animate-fade-up {
           animation: fade-up 0.15s ease-out;
         }
+        .range-slider {
+          -webkit-appearance: none;
+          appearance: none;
+          background: #e2e8f0;
+          border-radius: 999px;
+          outline: none;
+          height: 6px;
+          cursor: pointer;
+        }
+        .range-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          background: #3b82f6;
+          cursor: pointer;
+          border: 2px solid #fff;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
+        .range-slider::-moz-range-thumb {
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          background: #3b82f6;
+          cursor: pointer;
+          border: 2px solid #fff;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+        }
         .editor-surface h1,
         .editor-surface h2,
         .editor-surface h3,
@@ -1864,16 +2766,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .editor-surface blockquote {
           margin: 0 0 0.75em 0;
         }
-        .editor-surface h1 { font-size: 1.75rem; font-weight: 700; color: #0f172a; }
-        .editor-surface h2 { font-size: 1.375rem; font-weight: 600; color: #0f172a; }
-        .editor-surface h3 { font-size: 1.125rem; font-weight: 600; color: #0f172a; }
+        .editor-surface h1 { font-size: 1.75rem; font-weight: 700; color: #111827; }
+        .editor-surface h2 { font-size: 1.375rem; font-weight: 600; color: #111827; }
+        .editor-surface h3 { font-size: 1.125rem; font-weight: 600; color: #111827; }
         .editor-surface strong, .editor-surface b { font-weight: 700; }
         .editor-surface em, .editor-surface i { font-style: italic; }
         .editor-surface u { text-decoration: underline; }
         .editor-surface ul { list-style-type: disc; padding-left: 1.5rem; }
         .editor-surface ol { list-style-type: decimal; padding-left: 1.5rem; }
-        .editor-surface blockquote { border-left: 3px solid #e2e8f0; padding-left: 1rem; color: #475569; font-style: italic; }
-        .editor-surface a { color: #2563eb; text-decoration: underline; }
+        .editor-surface blockquote { border-left: 3px solid #b91c1c; padding-left: 1rem; color: #4b5563; font-style: italic; }
+        .editor-surface a { color: #b91c1c; text-decoration: underline; }
         .editor-surface img { max-width: 100%; border-radius: 0.5rem; }
         .editor-surface ::selection {
           background-color: rgba(239, 68, 68, 0.3);
@@ -1906,16 +2808,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .issue-highlight-ai:hover {
           background-color: rgba(252, 225, 138, 0.85);
         }
-        .score-ring { filter: drop-shadow(0 0 4px rgba(34,197,94,0.3)); }
-        .card-hover { transition: all 0.15s ease; }
-        .card-hover:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
-        .eval-card { transition: all 0.2s ease; }
-        .eval-card:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(0,0,0,0.07); }
-        @keyframes slide-up {
-          from { opacity: 0; transform: translateY(8px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        .animate-slide-up { animation: slide-up 0.3s ease-out both; }
         @media (max-width: 767px) {
           .editor-surface { font-size: 15px; line-height: 1.7; }
           .editor-surface h1 { font-size: 1.35rem; }
@@ -1926,6 +2818,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         }
         [contenteditable] { -webkit-tap-highlight-color: transparent; }
         [contenteditable]:focus { outline: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
       `}</style>
     </div>
   );

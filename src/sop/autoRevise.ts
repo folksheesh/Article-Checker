@@ -10,9 +10,9 @@ import {
   SOP_QUESTIONS,
 } from './constants';
 import { countSentences, countWords, parseArticle } from './parser';
-import { runSopChecks } from './sopRules';
+import { runSopChecks, getPrimaryKeyword } from './sopRules';
 import type { ArticleInput, CheckResult, RuleId } from './types';
-import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH } from './config';
+import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH, AI_REWRITE_TIMEOUT_MS, AI_KEYWORD_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
 
 export interface ReviseResult {
@@ -366,6 +366,14 @@ async function callOllamaRewrite(
     ? `\n\nCATATAN: Percobaan sebelumnya belum berhasil memperbaiki. Pastikan perubahan benar-benar mengatasi kriteria "${item.question}". Fokus pada teks yang tepat dan ukur hasilnya dengan saksama.`
     : '';
 
+  // Extract images so the AI can preserve their positions without seeing base64 data
+  const images: string[] = [];
+  let articleWithTokens = input.article.replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => {
+    images.push(m);
+    return `[[GAMBAR_${images.length - 1}]]`;
+  });
+  articleWithTokens = stripImages(articleWithTokens);
+
   const systemPrompt = `Anda adalah asisten Auto-Correct Editor Konten Hukum.
 Tugas Anda memperbaiki SATU kriteria spesifik berikut agar lolos validasi SOP penulisan artikel hukum.
 
@@ -377,6 +385,7 @@ ATURAN PERBAIKAN:
 - HASIL AKHIR harus memenuhi kriteria tersebut sepenuhnya.
 - Perubahan minimal dan presisi.
 - Jangan memvalidasi klaim hukum — hanya perbaiki format/tata tulis.
+- Artikel mengandung token gambar [[GAMBAR_0]], [[GAMBAR_1]], dst. PERTAHANKAN token-token tersebut persis di posisi aslinya dalam output. Jangan ubah, jangan hapus, dan jangan ganti formatnya.
 
 Batas SOP:
 - Judul: max ${MAX_TITLE_CHARS} karakter, mengandung keyword jika relevan
@@ -386,13 +395,14 @@ Batas SOP:
 - Meta title: max ${MAX_META_TITLE_CHARS} karakter
 - Meta desc: max ${MAX_META_DESC_CHARS} karakter
 
-Keyword utama: ${input.keyword}
+Keyword utama: ${stripImages(input.keyword || '')}
 
 Kembalikan JSON:
 { "metaTitle": "...", "metaDesc": "...", "article": "..." }`;
 
-  const cleanArticle = stripImages(input.article || '');
-  const userPrompt = `Meta Title: ${input.metaTitle}\nMeta Desc: ${input.metaDesc}\nArtikel:\n${cleanArticle}`;
+  const cleanMetaTitle = stripImages(input.metaTitle || '');
+  const cleanMetaDesc = stripImages(input.metaDesc || '');
+  const userPrompt = `Meta Title: ${cleanMetaTitle}\nMeta Desc: ${cleanMetaDesc}\nArtikel:\n${articleWithTokens}`;
 
   const headers2: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey) {
@@ -400,7 +410,7 @@ Kembalikan JSON:
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), AI_REWRITE_TIMEOUT_MS);
 
   const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
     method: 'POST',
@@ -427,8 +437,19 @@ Kembalikan JSON:
   const data = await response.json();
   const resultText = data.choices?.[0]?.message?.content || '{}';
   const parsed = JSON.parse(resultText.replace(/```json/gi, '').replace(/```/gi, '').trim());
+  let outArticle = typeof parsed.article === 'string' ? parsed.article : input.article;
+  // Restore image tokens in their original positions
+  images.forEach((img, i) => {
+    outArticle = outArticle.replace(`[[GAMBAR_${i}]]`, img);
+  });
+  // If some tokens were lost, append remaining images at the end as fallback
+  let missingIdx = 0;
+  while (outArticle.includes(`[[GAMBAR_${missingIdx}]]`)) missingIdx++;
+  for (let i = missingIdx; i < images.length; i++) {
+    outArticle = outArticle.trimEnd() + '\n\n' + images[i];
+  }
   return {
-    article: typeof parsed.article === 'string' ? parsed.article : input.article,
+    article: outArticle,
     metaTitle: typeof parsed.metaTitle === 'string' ? parsed.metaTitle : input.metaTitle,
     metaDesc: typeof parsed.metaDesc === 'string' ? parsed.metaDesc : input.metaDesc,
   };
@@ -470,8 +491,8 @@ Aturan:
 - Kembalikan HANYA JSON: { "keyword": "..." }`;
 
   const clean = stripImages(article);
-  const truncated = clean.length > 3000
-    ? clean.slice(0, 3000) + '\n\n...[artikel terpotong]'
+  const truncated = clean.length > 8000
+    ? clean.slice(0, 8000) + '\n\n...[artikel terpotong]'
     : clean;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -480,7 +501,7 @@ Aturan:
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), AI_KEYWORD_TIMEOUT_MS);
 
   const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
     method: 'POST',
@@ -510,6 +531,70 @@ Aturan:
   return typeof parsed.keyword === 'string' ? parsed.keyword.trim() : '';
 }
 
+export async function callOllamaGenerateKeywords(
+  apiKey: string,
+  article: string,
+): Promise<string[]> {
+  const effectiveApiKey = apiKey.trim() || OLLAMA_API_KEY;
+  const systemPrompt = `Anda adalah asisten SEO Konten Hukum.
+Tugas Anda memahami topik dan konteks dari seluruh artikel, lalu menghasilkan DAFTAR BESAR keyword/keyword LSI yang relevan untuk artikel tersebut.
+
+Aturan:
+- Buat 100+ keyword
+- Keyword boleh 2-5 kata, frasa spesifik yang paling relevan dengan topik inti artikel
+- Cakup variasi: keyword utama, keyword panjang (long-tail), keyword pertanyaan, keyword lokal, dan sinonim
+- Prioritaskan bahasa Indonesia
+- Hindari keyword generik/clickbait yang tidak relevan
+- Setiap keyword unik (tidak duplikat)
+- Kembalikan HANYA JSON: { "keywords": ["keyword 1", "keyword 2", ...] }`;
+
+  const clean = stripImages(article);
+  const truncated = clean.length > 8000
+    ? clean.slice(0, 8000) + '\n\n...[artikel terpotong]'
+    : clean;
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (effectiveApiKey) {
+    headers['Authorization'] = `Bearer ${effectiveApiKey}`;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AI_KEYWORD_TIMEOUT_MS);
+
+  const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `Artikel:\n${truncated}` },
+      ],
+      stream: false,
+      temperature: 0.5,
+    }),
+    signal: controller.signal,
+  });
+
+  clearTimeout(timeout);
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData?.error?.message || `API Error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const text = data.choices?.[0]?.message?.content || '{}';
+  const parsed = JSON.parse(text.replace(/```json/gi, '').replace(/```/gi, '').trim());
+  if (Array.isArray(parsed.keywords)) {
+    return parsed.keywords
+      .map((k: unknown) => (typeof k === 'string' ? k.trim() : ''))
+      .filter((k: string) => k.length > 0)
+      .slice(0, 150);
+  }
+  return [];
+}
+
 const KEYWORD_IDS: RuleId[] = [2, 16];
 
 export async function autoReviseItem(
@@ -537,7 +622,7 @@ export async function autoReviseItem(
     }
   }
 
-  const kw = newKeyword || input.keyword;
+  const kw = getPrimaryKeyword(newKeyword || input.keyword);
 
   // 1) Deterministic patch using the (possibly new) keyword
   let { article, metaTitle, metaDesc } = applyDeterministicFix(
