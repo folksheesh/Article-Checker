@@ -31,7 +31,6 @@ import {
   Target,
   Scale,
   Loader,
-  Search,
   Image as ImageIcon,
   Bot,
   RotateCcw,
@@ -42,13 +41,32 @@ import {
   AlignRight,
   AlignJustify,
   FileText,
+  ShieldCheck,
+  ScanLine,
+  Globe,
 } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import * as docx from 'docx';
-import { runSopChecks, evaluateWithAI, autoReviseItem, callOllamaGenerateKeywords, getPrimaryKeyword, type CheckResult, type SopReport, type AiEvaluationOutput } from './sop';
+import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric } from './sop';
 import { callArticleChat } from './sop/articleChat';
-import { OLLAMA_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
+import { OPENAI_API_KEY, AHREFS_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
 import { stripImages } from './sop/images';
+
+type HighlightMode = 'sop' | 'ai-detector' | 'plagiarism';
+type HoverKind = 'sop' | 'ai-detector' | 'plagiarism';
+type HoverData = {
+  x: number;
+  y: number;
+  kind: HoverKind;
+  label: string;
+  reason: string;
+  text: string;
+  score?: number;
+  issue?: CheckResult;
+};
+
+const AI_SENTENCE_HIGHLIGHT_THRESHOLD = 60;
+const PLAGIARISM_HIGHLIGHT_THRESHOLD = 40;
 
 const CATEGORIES = [
   { id: 'title', label: 'Judul', checks: [1, 2] },
@@ -285,6 +303,40 @@ function findTextMatch(text: string, query: string): { start: number; end: numbe
   return null;
 }
 
+function findTextMatchAfter(text: string, query: string, from: number): { start: number; end: number } | null {
+  const startAt = Math.max(0, from);
+  const sliced = text.slice(startAt);
+  const m = findTextMatch(sliced, query);
+  if (!m) return null;
+  return { start: m.start + startAt, end: m.end + startAt };
+}
+
+function computeRelevance(keyword: string, articleText: string): number {
+  const lowerArticle = articleText.toLowerCase();
+  const lowerKw = keyword.toLowerCase().trim();
+  if (!lowerKw || !articleText.trim()) return 1;
+
+  const words = lowerKw.split(/\s+/).filter(Boolean);
+  const escaped = lowerKw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const exactRegex = new RegExp(escaped, 'g');
+  const exactMatches = (lowerArticle.match(exactRegex) || []).length;
+
+  if (words.length === 1) {
+    if (exactMatches >= 15) return 10;
+    if (exactMatches >= 10) return 8;
+    if (exactMatches >= 6) return 6;
+    if (exactMatches >= 3) return 4;
+    return exactMatches >= 1 ? 2 : 1;
+  }
+
+  if (exactMatches > 0) return Math.min(10, 5 + exactMatches * 2);
+
+  const anyMatchCount = words.filter((w) => lowerArticle.includes(w)).length;
+  if (anyMatchCount >= words.length) return 5;
+  if (anyMatchCount >= words.length - 1) return 3;
+  return 1;
+}
+
 function getTextContent(html: string): string {
   const div = document.createElement('div');
   div.innerHTML = html;
@@ -362,21 +414,14 @@ export default function App() {
   const [aiResults, setAiResults] = useState<AiEvaluationOutput | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [hover, setHover] = useState<{ x: number; y: number; issue: CheckResult } | null>(null);
+  const [hover, setHover] = useState<HoverData | null>(null);
   const [fixingId, setFixingId] = useState<number | null>(null);
   const [flashText, setFlashText] = useState('');
   const [showKwPopup, setShowKwPopup] = useState(false);
   const [kwGenLoading, setKwGenLoading] = useState(false);
   const [kwGenError, setKwGenError] = useState('');
-  const [kwSuggestions, setKwSuggestions] = useState<string[]>([]);
   const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set());
-  const [kwSearch, setKwSearch] = useState('');
-
-  const filteredKeywords = useMemo(() => {
-    const q = kwSearch.trim().toLowerCase();
-    if (!q) return kwSuggestions;
-    return kwSuggestions.filter((kw) => kw.toLowerCase().includes(q));
-  }, [kwSuggestions, kwSearch]);
+  const [kwInput, setKwInput] = useState('');
   const [fileImportLoading, setFileImportLoading] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -392,6 +437,15 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [activeEvalTab, setActiveEvalTab] = useState<'sop' | 'ai-detector' | 'plagiarism'>('sop');
+  const [aiDetectorResult, setAiDetectorResult] = useState<AIDetectionResult | null>(null);
+  const [aiDetectorLoading, setAiDetectorLoading] = useState(false);
+  const [aiDetectorFixLoading, setAiDetectorFixLoading] = useState(false);
+  const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
+  const [plagiarismLoading, setPlagiarismLoading] = useState(false);
+  const [plagiarismFixLoading, setPlagiarismFixLoading] = useState(false);
+  const [ahrefsMetrics, setAhrefsMetrics] = useState<AhrefsKeywordMetric[]>([]);
+
   const chatRef = useRef<HTMLDivElement>(null);
 
   const editorRef = useRef<HTMLDivElement>(null);
@@ -545,6 +599,26 @@ export default function App() {
     const next = runSopChecks({ article, keyword, metaTitle, metaDesc });
     setLiveReport(next);
   }, [article, keyword, metaTitle, metaDesc]);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
+  }, [activeEvalTab]);
+
+  useEffect(() => {
+    if (!editorRef.current || activeEvalTab !== 'sop') return;
+    requestAnimationFrame(() => applyHighlights());
+  }, [report, aiResults, activeEvalTab]);
+
+  useEffect(() => {
+    if (!editorRef.current || activeEvalTab !== 'ai-detector') return;
+    requestAnimationFrame(() => applyHighlights(undefined, 'ai-detector'));
+  }, [aiDetectorResult, activeEvalTab]);
+
+  useEffect(() => {
+    if (!editorRef.current || activeEvalTab !== 'plagiarism') return;
+    requestAnimationFrame(() => applyHighlights(undefined, 'plagiarism'));
+  }, [plagiarismResult, activeEvalTab]);
 
   // Load saved draft on mount
   useEffect(() => {
@@ -755,20 +829,50 @@ export default function App() {
   };
 
   const showIssuePopup = (target: HTMLElement) => {
-    if (target.tagName !== 'MARK' || !target.dataset.issueId) return;
-    const issueId = Number(target.dataset.issueId);
-    const issue =
-      liveReport?.items.find((item) => item.id === issueId) ??
-      aiResults?.results.find((item) => item.id === issueId);
-    if (!issue) return;
+    if (target.tagName !== 'MARK') return;
+    const kind = (target.dataset.kind as HoverKind | undefined) ?? 'sop';
+
+    let popup: HoverData | null = null;
+    if (kind === 'sop') {
+      if (!target.dataset.issueId) return;
+      const issueId = Number(target.dataset.issueId);
+      const issue =
+        liveReport?.items.find((item) => item.id === issueId) ??
+        aiResults?.results.find((item) => item.id === issueId);
+      if (!issue) return;
+      popup = {
+        x: 0,
+        y: 0,
+        kind,
+        label: issue.question,
+        reason: issue.reason,
+        text: issue.problematic_text,
+        issue,
+      };
+    } else {
+      const label = target.dataset.label || (kind === 'ai-detector' ? 'AI Detector' : 'Plagiarism');
+      const reason = target.dataset.reason || '';
+      const text = target.dataset.text || target.textContent || '';
+      const scoreRaw = target.dataset.score;
+      popup = {
+        x: 0,
+        y: 0,
+        kind,
+        label,
+        reason,
+        text,
+        score: scoreRaw ? Number(scoreRaw) : undefined,
+      };
+    }
+
     hoverTargetRef.current = target;
     const rect = target.getBoundingClientRect();
     const above = rect.top - 48 >= 0;
     const pos = positionPopupFor(rect, 288, 250, above, 48);
     setHover({
+      ...popup,
       x: pos.x,
       y: pos.y,
-      issue,
     });
   };
 
@@ -783,7 +887,7 @@ export default function App() {
       clearTimeout(hideTimeoutRef.current);
       return;
     }
-    if (target.tagName === 'MARK' && target.dataset.issueId) {
+    if (target.tagName === 'MARK') {
       clearTimeout(hideTimeoutRef.current);
       showIssuePopup(target);
     } else if (hover) {
@@ -827,28 +931,16 @@ export default function App() {
 
   const handleEditorClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
-    if (target.tagName === 'MARK' && target.dataset.issueId) {
+    if (target.tagName === 'MARK') {
       showIssuePopup(target);
     }
   };
 
-  const applyHighlights = (reportOverride?: SopReport) => {
+  const applyHighlights = (reportOverride?: SopReport, modeOverride?: HighlightMode) => {
     const editor = editorRef.current;
-    let reportToApply = reportOverride ?? liveReport;
-    if (!editor || !reportToApply) return;
+    if (!editor) return;
 
-    // Always include AI results in highlights if available (exclude case issues, id 56)
-    if (!reportOverride && aiResults) {
-      const failedAi = aiResults.results.filter(
-        (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
-      );
-      if (failedAi.length > 0) {
-        reportToApply = {
-          ...reportToApply,
-          items: [...reportToApply.items, ...failedAi],
-        };
-      }
-    }
+    const mode = modeOverride ?? activeEvalTab;
 
     // Save selection as text offset
     const selection = window.getSelection();
@@ -861,19 +953,130 @@ export default function App() {
       offsetBefore = preRange.toString().length;
     }
 
-    const md = htmlToMarkdown(editor.innerHTML);
-    const issues = reportToApply.items.filter(
-      (item) => item.problematic_text?.trim().length > 0,
-    );
+    const highlightedMd = htmlToMarkdown(editor.innerHTML);
+    type HighlightRange = {
+      start: number;
+      end: number;
+      cls: string;
+      kind: HoverKind;
+      label: string;
+      reason: string;
+      text: string;
+      score?: number;
+      issueId?: number;
+    };
 
-    let highlightedMd = md;
-    const ranges: { start: number; end: number; issue: CheckResult }[] = [];
-    for (const issue of issues) {
-      const m = findTextMatch(highlightedMd, issue.problematic_text);
-      if (m) {
-        ranges.push({ start: m.start, end: m.end, issue });
+    const ranges: HighlightRange[] = [];
+
+    if (mode === 'sop') {
+      let reportToApply = reportOverride ?? liveReport;
+      if (!reportToApply) return;
+
+      if (!reportOverride && aiResults) {
+        const failedAi = aiResults.results.filter(
+          (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
+        );
+        if (failedAi.length > 0) {
+          reportToApply = {
+            ...reportToApply,
+            items: [...reportToApply.items, ...failedAi],
+          };
+        }
+      }
+
+      const issues = reportToApply.items.filter(
+        (item) => item.problematic_text?.trim().length > 0,
+      );
+      for (const issue of issues) {
+        const m = findTextMatch(highlightedMd, issue.problematic_text);
+        if (!m) continue;
+        let cls: string;
+        if (issue.source === 'ai') {
+          cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-ai';
+        } else {
+          cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
+        }
+        ranges.push({
+          start: m.start,
+          end: m.end,
+          cls,
+          kind: 'sop',
+          label: issue.question,
+          reason: issue.reason,
+          text: issue.problematic_text,
+          issueId: issue.id,
+        });
       }
     }
+
+    if (mode === 'ai-detector') {
+      const suspicious = (aiDetectorResult?.sentences || []).filter(
+        (s) => s.text?.trim().length > 0 && s.ai_probability >= AI_SENTENCE_HIGHLIGHT_THRESHOLD,
+      );
+      let cursor = 0;
+      for (const sentence of suspicious) {
+        const trimmed = sentence.text.trim();
+        const words = trimmed.split(/\s+/).filter(Boolean);
+        const candidates = [
+          trimmed,
+          words.slice(0, 14).join(' '),
+          words.slice(0, 10).join(' '),
+        ].filter((s) => s.length > 12);
+
+        let m: { start: number; end: number } | null = null;
+        for (const candidate of candidates) {
+          m = findTextMatchAfter(highlightedMd, candidate, cursor) ?? findTextMatch(highlightedMd, candidate);
+          if (m) break;
+        }
+        if (!m) continue;
+        ranges.push({
+          start: m.start,
+          end: m.end,
+          cls: 'issue-highlight-detector',
+          kind: 'ai-detector',
+          label: `AI Detector (${sentence.ai_probability}%)`,
+          reason: `Kalimat ini terindikasi AI-generated dengan probabilitas ${sentence.ai_probability}%.`,
+          text: sentence.text,
+          score: sentence.ai_probability,
+        });
+        cursor = m.end;
+      }
+    }
+
+    if (mode === 'plagiarism') {
+      const suspicious = (plagiarismResult?.matchedSources || []).filter(
+        (s) => s.matchedText?.trim().length > 0 && s.score >= PLAGIARISM_HIGHLIGHT_THRESHOLD,
+      );
+      let cursor = 0;
+      for (const source of suspicious) {
+        const trimmed = source.matchedText.trim();
+        const words = trimmed.split(/\s+/).filter(Boolean);
+        const candidates = [
+          trimmed,
+          words.slice(0, 14).join(' '),
+          words.slice(0, 10).join(' '),
+        ].filter((s) => s.length > 12);
+
+        let m: { start: number; end: number } | null = null;
+        for (const candidate of candidates) {
+          m = findTextMatchAfter(highlightedMd, candidate, cursor) ?? findTextMatch(highlightedMd, candidate);
+          if (m) break;
+        }
+        if (!m) continue;
+        ranges.push({
+          start: m.start,
+          end: m.end,
+          cls: 'issue-highlight-plagiarism',
+          kind: 'plagiarism',
+          label: `Plagiarism (${source.score}%)`,
+          reason: `Teks ini memiliki kemiripan dengan sumber ${source.url || 'eksternal'} (${source.score}%).`,
+          text: source.matchedText,
+          score: source.score,
+        });
+        cursor = m.end;
+      }
+    }
+
     ranges.sort((a, b) => a.start - b.start);
 
     let result = '';
@@ -881,15 +1084,12 @@ export default function App() {
     for (const range of ranges) {
       if (range.start < lastEnd) continue;
       result += highlightedMd.slice(lastEnd, range.start);
-      const safeReason = range.issue.reason.replace(/"/g, '&quot;');
-      const safeLabel = range.issue.question.replace(/"/g, '&quot;');
-      let cls: string;
-      if (range.issue.source === 'ai') {
-        cls = range.issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-ai';
-      } else {
-        cls = range.issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
-      }
-      result += `<mark class="${cls}" data-issue-id="${range.issue.id}" data-reason="${safeReason}" data-label="${safeLabel}">${highlightedMd.slice(
+      const safeReason = range.reason.replace(/"/g, '&quot;');
+      const safeLabel = range.label.replace(/"/g, '&quot;');
+      const safeText = range.text.replace(/"/g, '&quot;');
+      const safeIssueId = typeof range.issueId === 'number' ? ` data-issue-id="${range.issueId}"` : '';
+      const safeScore = typeof range.score === 'number' ? ` data-score="${range.score}"` : '';
+      result += `<mark class="${range.cls}" data-kind="${range.kind}"${safeIssueId}${safeScore} data-text="${safeText}" data-reason="${safeReason}" data-label="${safeLabel}">${highlightedMd.slice(
         range.start,
         range.end,
       )}</mark>`;
@@ -966,6 +1166,10 @@ export default function App() {
       setHover({
         x: pos.x,
         y: pos.y,
+        kind: 'sop',
+        label: issue.question,
+        reason: issue.reason,
+        text: issue.problematic_text,
         issue,
       });
     } else if (m) {
@@ -979,15 +1183,92 @@ export default function App() {
         setHover({
           x: pos.x,
           y: pos.y,
+          kind: 'sop',
+          label: issue.question,
+          reason: issue.reason,
+          text: issue.problematic_text,
           issue,
         });
       } else {
-        setHover({ x: editor.clientWidth / 2, y: 100, issue });
+        setHover({ x: editor.clientWidth / 2, y: 100, kind: 'sop', label: issue.question, reason: issue.reason, text: issue.problematic_text, issue });
       }
     } else {
-      setHover({ x: editor.clientWidth / 2, y: 100, issue });
+      setHover({ x: editor.clientWidth / 2, y: 100, kind: 'sop', label: issue.question, reason: issue.reason, text: issue.problematic_text, issue });
     }
     setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 15000);
+  };
+
+  const focusSnippet = (snippet: string) => {
+    const editor = editorRef.current;
+    if (!editor || !snippet?.trim()) return;
+    const text = getTextContent(editor.innerHTML);
+    const m = findTextMatch(text, snippet);
+    if (!m) {
+      editor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    editor.focus();
+    const start = findTextNodeAndOffset(editor, m.start);
+    const end = findTextNodeAndOffset(editor, m.end);
+    if (!start || !end) return;
+    const range = document.createRange();
+    range.setStart(start[0], start[1]);
+    range.setEnd(end[0], end[1]);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    const mark = range.startContainer.parentElement?.closest('mark');
+    if (mark) {
+      mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    setFlashText(snippet);
+    setTimeout(() => setFlashText(''), 1200);
+  };
+
+  const handleAutoCorrectHighlight = async (kind: 'ai-detector' | 'plagiarism', snippet: string) => {
+    if (!snippet.trim()) return;
+    if (kind === 'ai-detector') setAiDetectorFixLoading(true);
+    if (kind === 'plagiarism') setPlagiarismFixLoading(true);
+    try {
+      const m = findTextMatch(article, snippet);
+      if (!m) {
+        setFlashText('Teks tidak ditemukan untuk diperbaiki.');
+        setTimeout(() => setFlashText(''), 2500);
+        return;
+      }
+      const rewritten = await rewriteSnippet(article.slice(m.start, m.end), kind === 'ai-detector' ? 'ai' : 'plagiarism');
+      if (!rewritten || rewritten.toLowerCase() === article.slice(m.start, m.end).trim().toLowerCase()) {
+        setFlashText('Tidak ada perubahan signifikan dari auto-correct.');
+        setTimeout(() => setFlashText(''), 2500);
+        return;
+      }
+      const nextArticle = article.slice(0, m.start) + rewritten + article.slice(m.end);
+      pushUndo();
+      setArticleFromMarkdown(nextArticle);
+      const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
+      setLiveReport(newReport);
+      setReport(newReport);
+
+      if (kind === 'ai-detector') {
+        const refreshed = await detectAIContent(stripImages(nextArticle));
+        setAiDetectorResult(refreshed);
+      } else {
+        const refreshed = await checkPlagiarism(stripImages(nextArticle));
+        setPlagiarismResult(refreshed);
+      }
+
+      requestAnimationFrame(() => applyHighlights(undefined, kind));
+      setHover(null);
+      setFlashText('Auto-correct selesai.');
+      setTimeout(() => setFlashText(''), 2000);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal auto-correct.';
+      setFlashText(msg);
+      setTimeout(() => setFlashText(''), 3000);
+    } finally {
+      if (kind === 'ai-detector') setAiDetectorFixLoading(false);
+      if (kind === 'plagiarism') setPlagiarismFixLoading(false);
+    }
   };
 
   const handleAutoCorrect = async (item: CheckResult) => {
@@ -997,7 +1278,7 @@ export default function App() {
       const result = await autoReviseItem(
         { article, keyword, metaTitle, metaDesc },
         item,
-        '',
+        OPENAI_API_KEY,
       );
       const updatedKeyword = result.keyword || keyword;
       const updatedTitle = result.metaTitle || metaTitle;
@@ -1064,19 +1345,81 @@ export default function App() {
     requestAnimationFrame(() => applyHighlights(newReport));
   };
 
-  const handleGenerateKeyword = async () => {
+  const handleAnalyzeKeywords = async (source: 'ai' | 'manual' = 'ai') => {
     setKwGenLoading(true);
     setKwGenError('');
+    setAhrefsMetrics([]);
+    setSelectedKeywords(new Set());
+
+    let keywords: string[] = [];
+
     try {
-      const keywords = await callOllamaGenerateKeywords(OLLAMA_API_KEY, article);
-      if (keywords.length > 0) {
-        setKwSuggestions(keywords);
-        setSelectedKeywords(new Set());
+      if (source === 'ai') {
+        if (!article.trim()) {
+          setKwGenError('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');
+          setKwGenLoading(false);
+          return;
+        }
+        const { content } = await callChatCompletion({
+          messages: [
+            {
+              role: 'system',
+              content: `Anda adalah SEO keyword researcher. Analisis artikel berikut dan rekomendasikan 10-15 keyword yang paling relevan dan memiliki potensi SEO terbaik.
+
+Kembalikan JSON SAJA tanpa markdown atau pembungkus apapun:
+{ "keywords": ["keyword1", "keyword2", ...] }
+
+Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sinonim.`,
+            },
+            { role: 'user', content: stripImages(article).slice(0, 8000) },
+          ],
+          temperature: 0.3,
+          timeoutMs: 30_000,
+        });
+        const data = JSON.parse(content);
+        keywords = data.keywords || [];
+        if (keywords.length === 0) {
+          setKwGenError('AI tidak dapat merekomendasikan keyword. Coba dengan input manual.');
+          setKwGenLoading(false);
+          return;
+        }
       } else {
-        setKwGenError('Gagal menghasilkan keyword. Coba lagi.');
+        keywords = kwInput.split(',').map((k) => k.trim()).filter(Boolean);
+        if (keywords.length === 0) {
+          setKwGenError('Masukkan minimal 1 keyword dipisahkan koma.');
+          setKwGenLoading(false);
+          return;
+        }
       }
-    } catch {
-      setKwGenError('Gagal terhubung ke AI. Pastikan Ollama berjalan.');
+
+      const { data: metrics, error } = await fetchAhrefsKeywordMetrics(keywords.slice(0, 10), 'id', AHREFS_API_KEY);
+      let _finalMetrics: AhrefsKeywordMetric[];
+      if (error) {
+        _finalMetrics = generateMockAhrefsMetrics(keywords.slice(0, 10));
+        setAhrefsMetrics(_finalMetrics);
+        if (error.includes('API key') || error.includes('tidak dikonfigurasi')) {
+          setKwGenError('Ahrefs API key tidak dikonfigurasi. Menampilkan data simulasi.');
+        }
+      } else if (metrics.length > 0) {
+        _finalMetrics = metrics;
+        setAhrefsMetrics(_finalMetrics);
+      } else {
+        _finalMetrics = generateMockAhrefsMetrics(keywords.slice(0, 10));
+        setAhrefsMetrics(_finalMetrics);
+      }
+      const _existingKws = keyword.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+      setSelectedKeywords(new Set(_finalMetrics.filter(m => _existingKws.includes(m.keyword.toLowerCase())).map(m => m.keyword)));
+    } catch (err) {
+      if (source === 'ai' && keywords.length === 0) {
+        setAhrefsMetrics([]);
+        setKwGenError('Gagal: ' + (err instanceof Error ? err.message : 'Terjadi kesalahan'));
+      } else {
+        const _fallbackMetrics = generateMockAhrefsMetrics(keywords.length > 0 ? keywords.slice(0, 10) : ['keyword']);
+        setAhrefsMetrics(_fallbackMetrics);
+        setKwGenError('Gagal mengambil data Ahrefs. Menampilkan data simulasi.');
+        const _existingKws = keyword.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        setSelectedKeywords(new Set(_fallbackMetrics.filter(m => _existingKws.includes(m.keyword.toLowerCase())).map(m => m.keyword)));
+      }
     } finally {
       setKwGenLoading(false);
     }
@@ -1092,8 +1435,7 @@ export default function App() {
   };
 
   const selectAllKeywords = () => {
-    const filtered = kwSuggestions.filter((kw) => kw.toLowerCase().includes(kwSearch.toLowerCase()));
-    setSelectedKeywords(new Set(filtered));
+    setSelectedKeywords(new Set(ahrefsMetrics.map((m) => m.keyword)));
   };
 
   const deselectAllKeywords = () => {
@@ -1103,7 +1445,15 @@ export default function App() {
   const applySelectedKeywords = () => {
     const selected = Array.from(selectedKeywords);
     if (selected.length > 0) {
-      setKeyword(selected.join(', '));
+      const existing = keyword.split(',').map(k => k.trim()).filter(Boolean);
+      const existingLower = existing.map(k => k.toLowerCase());
+      const merged = [...existing];
+      for (const kw of selected) {
+        if (!existingLower.includes(kw.toLowerCase())) {
+          merged.push(kw);
+        }
+      }
+      setKeyword(merged.join(', '));
     }
     setShowKwPopup(false);
     setFlashText(`${selected.length} keyword dipilih`);
@@ -1135,7 +1485,7 @@ export default function App() {
         metaTitle: stripImages(metaTitle),
         metaDesc: stripImages(metaDesc),
       },
-      '',
+      OPENAI_API_KEY,
       signal,
     )
       .then((output) => {
@@ -1168,6 +1518,182 @@ export default function App() {
       .finally(() => {
         if (!signal.aborted) setAiLoading(false);
       });
+  };
+
+  const runAllChecks = async () => {
+    runAnalysis();
+    handleDetectAI({ switchTab: false });
+    handleCheckPlagiarism({ switchTab: false });
+  };
+
+  const handleDetectAI = async (opts?: { switchTab?: boolean }) => {
+    if (!article.trim()) return;
+      setAiDetectorLoading(true);
+    setAiDetectorResult(null);
+      try {
+        const result = await detectAIContent(stripImages(article));
+      setAiDetectorResult(result);
+      if (opts?.switchTab ?? true) setActiveEvalTab('ai-detector');
+      if (window.innerWidth < 768) setShowMobileEval(true);
+    } catch (err) {
+      setAiDetectorResult({
+        provider: 'none',
+        aiProbability: 0,
+        humanProbability: 0,
+        error: err instanceof Error ? err.message : 'Gagal mendeteksi AI.',
+      });
+    } finally {
+      setAiDetectorLoading(false);
+    }
+  };
+
+  const handleCheckPlagiarism = async (opts?: { switchTab?: boolean }) => {
+      if (!article.trim()) return;
+      setPlagiarismLoading(true);
+    setPlagiarismResult(null);
+      try {
+        const result = await checkPlagiarism(stripImages(article));
+      setPlagiarismResult(result);
+      if (opts?.switchTab ?? true) setActiveEvalTab('plagiarism');
+      if (window.innerWidth < 768) setShowMobileEval(true);
+    } catch (err) {
+      setPlagiarismResult({
+        provider: 'none',
+        plagiarismScore: 0,
+        matchedSources: [],
+        error: err instanceof Error ? err.message : 'Gagal memeriksa plagiasi.',
+      });
+    } finally {
+      setPlagiarismLoading(false);
+    }
+  };
+
+  const rewriteSnippet = async (text: string, mode: 'ai' | 'plagiarism') => {
+    const systemPrompt = mode === 'ai'
+      ? `Anda adalah editor bahasa Indonesia untuk artikel legal.
+Tulis ulang kalimat agar terdengar lebih natural seperti tulisan manusia tanpa mengubah fakta, makna, intent, dan konteks hukum.
+Pertahankan panjang relatif mirip, hindari pola repetitif, dan jangan menambah klaim baru.
+Kembalikan JSON SAJA: { "rewritten": "..." }`
+      : `Anda adalah editor anti-plagiarisme bahasa Indonesia untuk artikel legal.
+Tulis ulang teks agar lebih original, tetap akurat, dan tetap membawa makna yang sama.
+Gunakan struktur kalimat berbeda, diksi berbeda, dan hindari frasa identik.
+Kembalikan JSON SAJA: { "rewritten": "..." }`;
+
+    const { content } = await callChatCompletion({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: text },
+      ],
+      temperature: 0.35,
+      timeoutMs: 30_000,
+    });
+
+    try {
+      const data = JSON.parse(content);
+      return String(data.rewritten || '').trim();
+    } catch {
+      return content.trim();
+    }
+  };
+
+  const handleAutoCorrectAIDetector = async () => {
+    if (!aiDetectorResult?.sentences?.length) return;
+    const candidates = aiDetectorResult.sentences
+      .filter((s) => s.ai_probability >= AI_SENTENCE_HIGHLIGHT_THRESHOLD && s.text.trim().length > 20)
+      .slice(0, 8);
+    if (candidates.length === 0) {
+      setFlashText('Tidak ada kalimat AI tinggi yang bisa diperbaiki.');
+      setTimeout(() => setFlashText(''), 2500);
+      return;
+    }
+
+    setAiDetectorFixLoading(true);
+    try {
+      let nextArticle = article;
+      let fixedCount = 0;
+      for (const sentence of candidates) {
+        const m = findTextMatch(nextArticle, sentence.text);
+        if (!m) continue;
+        const rewritten = await rewriteSnippet(nextArticle.slice(m.start, m.end), 'ai');
+        if (!rewritten || rewritten.toLowerCase() === nextArticle.slice(m.start, m.end).trim().toLowerCase()) continue;
+        nextArticle = nextArticle.slice(0, m.start) + rewritten + nextArticle.slice(m.end);
+        fixedCount += 1;
+      }
+
+      if (fixedCount === 0) {
+        setFlashText('Belum ada bagian yang bisa di-auto-correct.');
+        setTimeout(() => setFlashText(''), 2500);
+        return;
+      }
+
+      pushUndo();
+      setArticleFromMarkdown(nextArticle);
+      const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
+      setLiveReport(newReport);
+      setReport(newReport);
+      setFlashText(`${fixedCount} bagian AI berhasil diperbaiki.`);
+      setTimeout(() => setFlashText(''), 2500);
+
+      const refreshed = await detectAIContent(stripImages(nextArticle));
+      setAiDetectorResult(refreshed);
+      requestAnimationFrame(() => applyHighlights(undefined, 'ai-detector'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal auto-correct AI detector.';
+      setFlashText(msg);
+      setTimeout(() => setFlashText(''), 3500);
+    } finally {
+      setAiDetectorFixLoading(false);
+    }
+  };
+
+  const handleAutoCorrectPlagiarism = async () => {
+    if (!plagiarismResult?.matchedSources?.length) return;
+    const candidates = plagiarismResult.matchedSources
+      .filter((s) => s.score >= PLAGIARISM_HIGHLIGHT_THRESHOLD && s.matchedText.trim().length > 20)
+      .slice(0, 8);
+    if (candidates.length === 0) {
+      setFlashText('Tidak ada teks plagiarisme yang bisa diperbaiki.');
+      setTimeout(() => setFlashText(''), 2500);
+      return;
+    }
+
+    setPlagiarismFixLoading(true);
+    try {
+      let nextArticle = article;
+      let fixedCount = 0;
+      for (const source of candidates) {
+        const m = findTextMatch(nextArticle, source.matchedText);
+        if (!m) continue;
+        const rewritten = await rewriteSnippet(nextArticle.slice(m.start, m.end), 'plagiarism');
+        if (!rewritten || rewritten.toLowerCase() === nextArticle.slice(m.start, m.end).trim().toLowerCase()) continue;
+        nextArticle = nextArticle.slice(0, m.start) + rewritten + nextArticle.slice(m.end);
+        fixedCount += 1;
+      }
+
+      if (fixedCount === 0) {
+        setFlashText('Belum ada bagian yang bisa di-auto-correct.');
+        setTimeout(() => setFlashText(''), 2500);
+        return;
+      }
+
+      pushUndo();
+      setArticleFromMarkdown(nextArticle);
+      const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
+      setLiveReport(newReport);
+      setReport(newReport);
+      setFlashText(`${fixedCount} bagian plagiarisme berhasil diperbaiki.`);
+      setTimeout(() => setFlashText(''), 2500);
+
+      const refreshed = await checkPlagiarism(stripImages(nextArticle));
+      setPlagiarismResult(refreshed);
+      requestAnimationFrame(() => applyHighlights(undefined, 'plagiarism'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Gagal auto-correct plagiarisme.';
+      setFlashText(msg);
+      setTimeout(() => setFlashText(''), 3500);
+    } finally {
+      setPlagiarismFixLoading(false);
+    }
   };
 
   const loadMockArticle = () => {
@@ -1380,7 +1906,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     setChatMessages((prev) => [...prev, { role: 'user', content: prompt }]);
     setChatLoading(true);
     try {
-      const result = await callArticleChat(article, prompt);
+      const result = await callArticleChat(article, prompt, OPENAI_API_KEY);
       setChatMessages((prev) => [...prev, { role: 'assistant', content: result.content, type: result.type }]);
       if (result.type === 'article') {
         pushUndo();
@@ -1695,7 +2221,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   <button
                     id="btn-keyword-generate"
                     type="button"
-                    onClick={() => setShowKwPopup(true)}
+                    onClick={() => { setShowKwPopup(true); handleAnalyzeKeywords('ai'); }}
                     className="shrink-0 p-1.5 rounded-md text-red-600 hover:text-red-700 hover:bg-red-50 transition"
                     title="Generate keyword dengan AI"
                   >
@@ -2048,7 +2574,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               </div>
             )}
             {hover && (() => {
-              const passed = hover.issue.status === 'passed';
+              const issue = hover.issue;
+              const isSop = hover.kind === 'sop' && !!issue;
+              const passed = isSop ? issue!.status === 'passed' : false;
               return (
               <div
                 id="issue-popup"
@@ -2058,47 +2586,79 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 onMouseLeave={scheduleHide}
               >
                 <div id="issue-popup-header" className="flex items-start gap-2 mb-2">
-                  {passed
-                    ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" />
-                    : <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
-                  <h4 id="issue-popup-title" className="text-sm font-semibold text-gray-900 leading-tight">{hover.issue.question}</h4>
+                  {passed ? <CheckCircle2 className="w-4 h-4 text-green-500 mt-0.5 shrink-0" /> : <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 shrink-0" />}
+                  <h4 id="issue-popup-title" className="text-sm font-semibold text-gray-900 leading-tight">{hover.label}</h4>
                 </div>
-                <p id="issue-popup-reason" className="text-xs text-gray-600 leading-relaxed mb-3">{hover.issue.reason}</p>
-                {!passed && (
+                <p id="issue-popup-reason" className="text-xs text-gray-600 leading-relaxed mb-3">{hover.reason}</p>
+
+                {!isSop && hover.text && (
+                  <div className="text-[10px] text-gray-500 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1 mb-2 line-clamp-3">"{hover.text}"</div>
+                )}
+
+                {isSop && !passed && (
                   <div id="issue-popup-sop" className="bg-gray-50 rounded-lg p-2.5 text-[11px] text-gray-600">
                     <div className="font-semibold text-gray-800 mb-1">SOP</div>
-                    {SUGGESTED_LABELS[hover.issue.id] || 'Periksa kembali bagian ini sesuai SOP.'}
+                    {issue ? SUGGESTED_LABELS[issue.id] || 'Periksa kembali bagian ini sesuai SOP.' : ''}
                   </div>
                 )}
                 <div id="issue-popup-actions" className="mt-3 flex items-center justify-between">
-                  {!passed && hover.issue.id === 56 ? (
+                  {isSop && !passed && issue && issue.id === 56 ? (
                     <button
                       id="issue-popup-autocorrect-case"
                       type="button"
-                      onClick={() => handleAutoCorrectCase(hover.issue)}
+                      onClick={() => handleAutoCorrectCase(issue)}
                       className="text-[11px] px-2.5 py-1 rounded-md bg-red-700 text-white hover:bg-red-800 disabled:opacity-50 disabled:cursor-wait transition"
                     >
                       Auto Correct
                     </button>
-                  ) : !passed && (
+                  ) : isSop && !passed && issue ? (
                     <button
                       id="issue-popup-autocorrect"
                       type="button"
-                      disabled={fixingId === hover.issue.id}
-                      onClick={() => handleAutoCorrect(hover.issue)}
+                      disabled={fixingId === issue.id}
+                      onClick={() => handleAutoCorrect(issue)}
                       className="text-[11px] px-2.5 py-1 rounded-md bg-red-700 text-white hover:bg-red-800 disabled:opacity-50 disabled:cursor-wait transition"
                     >
-                      {fixingId === hover.issue.id ? 'Memperbaiki...' : 'Auto Correct'}
+                      {fixingId === issue.id ? 'Memperbaiki...' : 'Auto Correct'}
+                    </button>
+                  ) : hover.kind === 'ai-detector' ? (
+                    <button
+                      type="button"
+                      disabled={aiDetectorFixLoading}
+                      onClick={() => handleAutoCorrectHighlight('ai-detector', hover.text)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 disabled:cursor-wait transition"
+                    >
+                      {aiDetectorFixLoading ? 'Memperbaiki...' : 'Auto Correct'}
+                    </button>
+                  ) : hover.kind === 'plagiarism' ? (
+                    <button
+                      type="button"
+                      disabled={plagiarismFixLoading}
+                      onClick={() => handleAutoCorrectHighlight('plagiarism', hover.text)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-50 disabled:cursor-wait transition"
+                    >
+                      {plagiarismFixLoading ? 'Memperbaiki...' : 'Auto Correct'}
+                    </button>
+                  ) : <span />}
+
+                  {isSop && issue ? (
+                    <button
+                      id="issue-popup-focus"
+                      type="button"
+                      onClick={() => focusIssue(issue)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-gray-800 text-white hover:bg-gray-700"
+                    >
+                      Fokus
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => focusSnippet(hover.text)}
+                      className="text-[11px] px-2.5 py-1 rounded-md bg-gray-800 text-white hover:bg-gray-700"
+                    >
+                      Fokus
                     </button>
                   )}
-                  <button
-                    id="issue-popup-focus"
-                    type="button"
-                    onClick={() => focusIssue(hover.issue)}
-                    className="text-[11px] px-2.5 py-1 rounded-md bg-gray-800 text-white hover:bg-gray-700"
-                  >
-                    Fokus
-                  </button>
                 </div>
               </div>
               );
@@ -2299,11 +2859,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               <button
                 id="btn-periksa"
                 type="button"
-                onClick={runAnalysis}
-                disabled={isAnalyzing || aiLoading || !article.trim()}
+                onClick={runAllChecks}
+                disabled={isAnalyzing || aiLoading || aiDetectorLoading || plagiarismLoading || !article.trim()}
                 className="flex items-center gap-1.5 px-3 py-2 bg-red-700 text-white text-xs font-semibold rounded-lg hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm shadow-red-700/20"
               >
-                {isAnalyzing || aiLoading ? (
+                {isAnalyzing || aiLoading || aiDetectorLoading || plagiarismLoading ? (
                   <>
                     <svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none">
                       <circle cx="12" cy="12" r="10" stroke="#ffffff" strokeWidth="3" strokeOpacity="0.3" />
@@ -2319,166 +2879,377 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             </div>
           </div>
 
+          <div className="px-5 pt-4 border-b border-gray-100">
+            <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-lg">
+              {([
+                { id: 'sop', label: 'SOP', icon: Target },
+                { id: 'ai-detector', label: 'AI Detector', icon: ShieldCheck },
+                { id: 'plagiarism', label: 'Plagiarism', icon: ScanLine },
+              ] as const).map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setActiveEvalTab(id)}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-semibold rounded-md transition ${activeEvalTab === id ? 'bg-white text-red-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  <Icon className="w-3 h-3" />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div data-eval-panel className="flex-1 overflow-y-auto min-h-0 p-5 pb-20 md:pb-5">
-            {!report ? (
-              <div className="flex flex-col items-center justify-center h-full text-center py-12">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center mb-4">
-                  <Target className="w-7 h-7 text-gray-400" />
+            {(() => {
+              const _sopLoading = (isAnalyzing || aiLoading) && !aiResults;
+              const _aiDetLoading = aiDetectorLoading && !aiDetectorResult;
+              const _plagLoading = plagiarismLoading && !plagiarismResult;
+              const _tabLoading = activeEvalTab === 'sop' ? _sopLoading : activeEvalTab === 'ai-detector' ? _aiDetLoading : _plagLoading;
+              if (_tabLoading) return (
+                <div className="flex items-center justify-center h-full min-h-[250px]">
+                  <div className="flex flex-col items-center gap-4">
+                    <svg className="w-10 h-10 animate-spin" viewBox="0 0 24 24" fill="none" style={{ animationDuration: '0.8s' }}>
+                      <circle cx="12" cy="12" r="10" stroke="#e5e7eb" strokeWidth="3" />
+                      <circle cx="12" cy="12" r="10" stroke="#b91c1c" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" />
+                    </svg>
+                    <span className="text-sm font-medium text-gray-500">Menganalisis artikel...</span>
+                  </div>
                 </div>
-                <p className="text-sm font-semibold text-gray-500 mb-1">Belum Ada Evaluasi</p>
-                <p className="text-xs text-gray-400 max-w-44 leading-relaxed">
-                  Klik <strong className="text-red-600 font-semibold">Periksa</strong> di atas untuk menjalankan SOP check pada artikel Anda
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                <h3 className="text-xs font-bold text-gray-900 mb-3">Daftar Issue</h3>
-                {(() => {
-                  const a: typeof CATEGORIES = [];
-                  const b: typeof CATEGORIES = [];
-                  const c: typeof CATEGORIES = [];
-                  for (const cat of CATEGORIES) {
-                    const i = getCategoryIssue(report, cat.id);
-                    const st = getCategoryStatus(report, cat.id);
-                    if (st !== 'passed' && i) {
-                      if (i.problematic_text?.trim()) a.push(cat); else b.push(cat);
-                    } else {
-                      c.push(cat);
-                    }
-                  }
-                  const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
-                    const iss = getCategoryIssue(report, cat.id);
-                    const st = getCategoryStatus(report, cat.id);
-                    const isPassed = st === 'passed';
-                    const I = isPassed ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
-                    const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-gray-400' : 'text-red-500';
-                    const itemForReason = iss || report.items.find((item) => cat.checks.includes(item.id));
-                    return (
-                      <button key={cat.id} type="button" onClick={() => clickable && iss && focusIssue(iss)} disabled={!clickable}
-                        className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border transition text-left group ${clickable && !isPassed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : isPassed ? 'bg-gray-50/50 border-gray-100 cursor-default' : 'bg-gray-50/60 border-transparent cursor-default'}`}>
-                        <I className={`w-4 h-4 shrink-0 ${co}`} />
-                        <div className="flex-1 min-w-0">
-                          <div className={`text-xs font-medium ${isPassed ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
-                          {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">{itemForReason.reason}</div>}
+              );
+              return (
+                <>
+                  {activeEvalTab !== 'sop' ? null : !report ? (
+                    <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center mb-4">
+                        <Target className="w-7 h-7 text-gray-400" />
+                      </div>
+                      <p className="text-sm font-semibold text-gray-500 mb-1">Belum Ada Evaluasi</p>
+                      <p className="text-xs text-gray-400 max-w-44 leading-relaxed">
+                        Klik <strong className="text-red-600 font-semibold">Periksa</strong> di atas untuk menjalankan SOP check pada artikel Anda
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <h3 className="text-xs font-bold text-gray-900 mb-4">Daftar Issue</h3>
+                      {(() => {
+                        const a: typeof CATEGORIES = [];
+                        const b: typeof CATEGORIES = [];
+                        const c: typeof CATEGORIES = [];
+                        for (const cat of CATEGORIES) {
+                          const i = getCategoryIssue(report, cat.id);
+                          const st = getCategoryStatus(report, cat.id);
+                          if (st !== 'passed' && i) {
+                            if (i.problematic_text?.trim()) a.push(cat); else b.push(cat);
+                          } else {
+                            c.push(cat);
+                          }
+                        }
+                        const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
+                          const iss = getCategoryIssue(report, cat.id);
+                          const st = getCategoryStatus(report, cat.id);
+                          const isPassed = st === 'passed';
+                          const I = isPassed ? CheckCircle2 : st === 'deferred' ? AlertCircle : XCircle;
+                          const co = isPassed ? 'text-emerald-500' : st === 'deferred' ? 'text-gray-400' : 'text-red-500';
+                          const itemForReason = iss || report.items.find((item) => cat.checks.includes(item.id));
+                          return (
+                            <button key={cat.id} type="button" onClick={() => clickable && iss && focusIssue(iss)} disabled={!clickable}
+                              className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl border transition text-left group ${clickable && !isPassed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : isPassed ? 'bg-gray-50/50 border-gray-100 cursor-default' : 'bg-gray-50/60 border-transparent cursor-default'}`}>
+                              <I className={`w-4 h-4 shrink-0 ${co}`} />
+                              <div className="flex-1 min-w-0">
+                                <div className={`text-xs font-medium ${isPassed ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
+                                {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">{itemForReason.reason}</div>}
+                              </div>
+                              {isPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
+                            </button>
+                          );
+                        };
+                        return (
+                          <>
+                            {a.length > 0 && <div><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
+                            {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
+                            {c.length > 0 && (
+                              <div className="mt-4 pt-3 border-t border-gray-100">
+                                <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
+                                  className="flex items-center gap-2 text-[10px] font-medium text-gray-400 hover:text-gray-600 transition px-0.5"
+                                >
+                                  <span className={`inline-block transition-transform ${showPassedIssues ? 'rotate-90' : ''}`}>▶</span>
+                                  {showPassedIssues ? 'Sembunyikan' : 'Lihat'}{' '}
+                                  <span className="text-gray-400">{c.length} kategori lulus</span>
+                                </button>
+                                {showPassedIssues && (
+                                  <div className="mt-1.5 space-y-1">
+                                    {c.map((cat) => renderRow(cat, false))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+
+                  {activeEvalTab === 'sop' ? (
+                    <div className="mt-6 pt-5 border-t border-gray-200">
+                      <h3 className="text-xs font-bold text-gray-900 mb-3 flex items-center gap-1.5">
+                        <BrainCircuit className="w-3.5 h-3.5 text-gray-600" /> AI Evaluation
+                      </h3>
+
+                      {!aiResults && (
+                        <div className="flex flex-col items-center gap-3 py-8 text-center">
+                          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center">
+                            <BrainCircuit className="w-5 h-5 text-gray-400" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-medium text-gray-500 mb-0.5">Analisis AI</p>
+                            <p className="text-[10px] text-gray-400 leading-relaxed">Klik <strong className="text-red-600 font-semibold">Periksa</strong> untuk hasil</p>
+                          </div>
                         </div>
-                        {isPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
-                      </button>
-                    );
-                  };
-                  return (
-                    <>
-                      {a.length > 0 && <div><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
-                      {b.length > 0 && <div className={a.length > 0 ? 'mt-4' : ''}><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
-                      {c.length > 0 && (
-                        <div className="mt-4 pt-3 border-t border-gray-100">
-                          <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
-                            className="flex items-center gap-2 text-[10px] font-medium text-gray-400 hover:text-gray-600 transition px-0.5"
-                          >
-                            <span className={`inline-block transition-transform ${showPassedIssues ? 'rotate-90' : ''}`}>▶</span>
-                            {showPassedIssues ? 'Sembunyikan' : 'Lihat'}{' '}
-                            <span className="text-gray-400">{c.length} kategori lulus</span>
-                          </button>
-                          {showPassedIssues && (
-                            <div className="mt-1.5 space-y-1">
-                              {c.map((cat) => renderRow(cat, false))}
+                      )}
+
+                      {aiResults && aiResults.results.length > 0 && (() => {
+                        return (
+                          <>
+                            <div className="space-y-4">
+                              {aiResults.results.map((r) => {
+                                const score = r.aiConfidence || 0;
+                                const passed = r.status === 'passed';
+                                const hasText = !!r.problematic_text?.trim();
+                                const Card = hasText && !passed ? 'button' : 'div';
+                                const cardProps = hasText && !passed ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
+                                return (
+                                  <Card key={r.id} {...cardProps}
+                                    className={`w-full flex flex-col p-3 rounded-xl border text-left transition group ${hasText && !passed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : 'bg-white border-gray-100'}`}
+                                  >
+                                    <div className="flex items-start gap-2.5">
+                                      {passed ? (
+                                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                                      ) : (
+                                        <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                                      )}
+                                      <div className="flex-1 min-w-0">
+                                        <div className="text-[11px] font-medium text-gray-800 mb-0.5 leading-snug">{r.question}</div>
+                                        <div className="text-[10px] text-gray-500 leading-snug">{r.reason || '-'}</div>
+                                        {hasText && (
+                                          <div className="mt-1 text-[10px] text-gray-400 bg-gray-50 border border-gray-200 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
+                                        )}
+                                      </div>
+                                      <div className="flex flex-col items-center gap-1 shrink-0 min-w-[24px]">
+                                        <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
+                                      </div>
+                                    </div>
+                                    <div className="mt-2 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
+                                      <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
+                                    </div>
+                                  </Card>
+                                );
+                              })}
+                            </div>
+                          </>
+                        );
+                      })()}
+                      {aiResults && aiResults.results.length === 0 && (
+                        <div className={`flex items-center gap-2.5 p-3 rounded-xl border ${aiError ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
+                          {aiError ? (
+                            <>
+                              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+                              <span className="text-[11px] text-red-700 leading-relaxed">{aiError || 'Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.'}</span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                              <span className="text-[11px] text-emerald-700 leading-relaxed">AI tidak menemukan masalah pada artikel ini.</span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {activeEvalTab === 'ai-detector' ? (
+                    <div className="flex flex-col" style={{ minHeight: '200px' }}>
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-1.5">
+                          <ShieldCheck className="w-4 h-4 text-red-600" />
+                          <span className="text-xs font-bold text-gray-900">AI Content Detector</span>
+                        </div>
+                        <span className="text-[10px] text-gray-400">Gunakan tombol Periksa utama</span>
+                      </div>
+
+                      {!aiDetectorResult && !aiDetectorLoading && (
+                        <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center mb-4">
+                            <ShieldCheck className="w-7 h-7 text-gray-400" />
+                          </div>
+                          <p className="text-sm font-semibold text-gray-500 mb-1">AI Detector</p>
+                          <p className="text-xs text-gray-400 max-w-48 leading-relaxed">
+                            Deteksi apakah teks terdeteksi sebagai AI-generated menggunakan ChatGPT.
+                          </p>
+                        </div>
+                      )}
+
+                      {aiDetectorResult?.error && (
+                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-100 text-xs text-amber-700 leading-relaxed">
+                          {aiDetectorResult.error}
+                        </div>
+                      )}
+
+                      {aiDetectorResult && !aiDetectorResult.error && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-4">
+                            <div className="relative w-20 h-20 shrink-0">
+                              <svg className="w-20 h-20 -rotate-90" viewBox="0 0 36 36">
+                                <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                                <circle cx="18" cy="18" r="15.5" fill="none"
+                                  stroke={aiDetectorResult.aiProbability >= 50 ? '#ef4444' : '#22c55e'}
+                                  strokeWidth="3" strokeDasharray={`${(aiDetectorResult.aiProbability / 100) * 97.39} 97.39`}
+                                  strokeLinecap="round" />
+                              </svg>
+                              <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-gray-900">{aiDetectorResult.aiProbability}%</span>
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-xs font-semibold text-gray-700 mb-1">
+                                {aiDetectorResult.aiProbability >= 50 ? 'Kemungkinan AI-generated' : 'Kemungkinan Human-written'}
+                              </p>
+                              <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+                                <div className="h-full rounded-full transition-all" style={{ width: `${aiDetectorResult.aiProbability}%`, backgroundColor: aiDetectorResult.aiProbability >= 50 ? '#ef4444' : '#22c55e' }} />
+                              </div>
+                            </div>
+                          </div>
+
+                          {aiDetectorResult.sentences && aiDetectorResult.sentences.some((s) => s.ai_probability >= AI_SENTENCE_HIGHLIGHT_THRESHOLD) && (
+                            <button
+                              type="button"
+                              onClick={handleAutoCorrectAIDetector}
+                              disabled={aiDetectorFixLoading}
+                              className="w-full px-3 py-2 text-[11px] font-semibold text-white rounded-lg bg-gradient-to-r from-violet-600 to-violet-500 hover:from-violet-700 hover:to-violet-600 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-1.5 shadow-sm"
+                            >
+                              {aiDetectorFixLoading ? (
+                                <><svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#fff" strokeWidth="3" strokeOpacity="0.3" /><circle cx="12" cy="12" r="10" stroke="#fff" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" /></svg> Memperbaiki...</>
+                              ) : (
+                                <><Sparkles className="w-3 h-3" /> Auto Correct AI Detector</>
+                              )}
+                            </button>
+                          )}
+
+                          {aiDetectorResult.explanation && (
+                            <div className="p-3 rounded-xl bg-gray-50 border border-gray-200">
+                              <p className="text-[10px] text-gray-700 leading-relaxed">{aiDetectorResult.explanation}</p>
+                            </div>
+                          )}
+
+                          {aiDetectorResult.sentences && aiDetectorResult.sentences.length > 0 && (
+                            <div className="border border-gray-200 rounded-xl overflow-hidden">
+                              <div className="bg-gray-50 px-3 py-2 text-[10px] font-semibold text-gray-600 border-b border-gray-200">
+                                Detail per kalimat
+                              </div>
+                              <div className="max-h-48 overflow-y-auto p-2 space-y-1">
+                                {aiDetectorResult.sentences.map((s, i) => (
+                                  <div key={i} className="flex items-start gap-2 p-2 rounded-lg bg-gray-50">
+                                    <span className={`text-[10px] font-semibold shrink-0 ${s.ai_probability >= 50 ? 'text-red-600' : 'text-emerald-600'}`}>{s.ai_probability}%</span>
+                                    <p className="text-[10px] text-gray-600 leading-snug">{s.text}</p>
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           )}
                         </div>
                       )}
-                    </>
-                  );
-                })()}
-              </div>
-            )}
-
-            <div className="mt-6 pt-5 border-t border-gray-200">
-              <h3 className="text-xs font-bold text-gray-900 mb-3 flex items-center gap-1.5">
-                <BrainCircuit className="w-3.5 h-3.5 text-gray-600" /> AI Evaluation
-              </h3>
-
-              {aiLoading && (
-                <div className="flex items-center gap-3 p-4 rounded-xl bg-gradient-to-r from-red-50 to-white border border-red-100">
-                  <div className="relative w-6 h-6 shrink-0">
-                    <svg className="w-6 h-6 animate-spin" viewBox="0 0 24 24" fill="none" style={{ animationDuration: '0.8s' }}>
-                      <circle cx="12" cy="12" r="10" stroke="#e5e7eb" strokeWidth="3" />
-                      <circle cx="12" cy="12" r="10" stroke="#b91c1c" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" />
-                    </svg>
-                  </div>
-                  <span className="text-xs font-medium text-red-800">Menganalisis artikel dengan AI...</span>
-                </div>
-              )}
-
-              {!aiLoading && !aiResults && (
-                <div className="flex flex-col items-center gap-3 py-8 text-center">
-                  <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center">
-                    <BrainCircuit className="w-5 h-5 text-gray-400" />
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-gray-500 mb-0.5">Analisis AI</p>
-                    <p className="text-[10px] text-gray-400 leading-relaxed">Klik <strong className="text-red-600 font-semibold">Periksa</strong> untuk hasil</p>
-                  </div>
-                </div>
-              )}
-
-              {!aiLoading && aiResults && aiResults.results.length > 0 && (() => {
-                return (
-                  <>
-                    <div className="space-y-1.5">
-                      {aiResults.results.map((r) => {
-                        const score = r.aiConfidence || 0;
-                        const passed = r.status === 'passed';
-                        const hasText = !!r.problematic_text?.trim();
-                        const Card = hasText && !passed ? 'button' : 'div';
-                        const cardProps = hasText && !passed ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
-                        return (
-                          <Card key={r.id} {...cardProps}
-                            className={`w-full flex flex-col p-3 rounded-xl border text-left transition group ${hasText && !passed ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : 'bg-white border-gray-100'}`}
-                          >
-                            <div className="flex items-start gap-2.5">
-                              {passed ? (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                              ) : (
-                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                              )}
-                              <div className="flex-1 min-w-0">
-                                <div className="text-[11px] font-medium text-gray-800 mb-0.5 leading-snug">{r.question}</div>
-                                <div className="text-[10px] text-gray-500 leading-snug">{r.reason || '-'}</div>
-                                {hasText && (
-                                  <div className="mt-1 text-[10px] text-gray-400 bg-gray-50 border border-gray-200 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
-                                )}
-                              </div>
-                              <div className="flex flex-col items-center gap-1 shrink-0 min-w-[24px]">
-                                <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : 'text-red-500'}`}>{score}</span>
-                              </div>
-                            </div>
-                            <div className="mt-2 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                              <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
-                            </div>
-                          </Card>
-                        );
-                      })}
                     </div>
-                  </>
-                );
-              })()}
+                  ) : null}
 
-              {!aiLoading && aiResults && aiResults.results.length === 0 && (
-                <div className={`flex items-center gap-2.5 p-3 rounded-xl border ${aiError ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
-                  {aiError ? (
-                    <>
-                      <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
-                      <span className="text-[11px] text-red-700 leading-relaxed">{aiError || 'Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.'}</span>
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                      <span className="text-[11px] text-emerald-700 leading-relaxed">AI tidak menemukan masalah pada artikel ini.</span>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
+                  {activeEvalTab === 'plagiarism' ? (
+                    <div className="flex flex-col" style={{ minHeight: '200px' }}>
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-1.5">
+                          <ScanLine className="w-4 h-4 text-red-600" />
+                          <span className="text-xs font-bold text-gray-900">Plagiarism Checker</span>
+                        </div>
+                        <span className="text-[10px] text-gray-400">Gunakan tombol Periksa utama</span>
+                      </div>
 
+                      {!plagiarismResult && !plagiarismLoading && (
+                        <div className="flex flex-col items-center justify-center h-full text-center py-12">
+                          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-red-50 to-gray-50 border border-dashed border-gray-300 flex items-center justify-center mb-4">
+                            <ScanLine className="w-7 h-7 text-gray-400" />
+                          </div>
+                          <p className="text-sm font-semibold text-gray-500 mb-1">Plagiarism Checker</p>
+                          <p className="text-xs text-gray-400 max-w-48 leading-relaxed">
+                            Periksa plagiasi artikel menggunakan ChatGPT.
+                          </p>
+                        </div>
+                      )}
+
+                      {plagiarismResult?.error && (
+                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-100 text-xs text-amber-700 leading-relaxed">
+                          {plagiarismResult.error}
+                        </div>
+                      )}
+
+                      {plagiarismResult && !plagiarismResult.error && (
+                        <div className="space-y-4">
+                          <div className="flex items-center gap-4">
+                            <div className="relative w-20 h-20 shrink-0">
+                              <svg className="w-20 h-20 -rotate-90" viewBox="0 0 36 36">
+                                <circle cx="18" cy="18" r="15.5" fill="none" stroke="#e5e7eb" strokeWidth="3" />
+                                <circle cx="18" cy="18" r="15.5" fill="none"
+                                  stroke={plagiarismResult.plagiarismScore >= 30 ? '#ef4444' : '#22c55e'}
+                                  strokeWidth="3" strokeDasharray={`${(plagiarismResult.plagiarismScore / 100) * 97.39} 97.39`}
+                                  strokeLinecap="round" />
+                              </svg>
+                              <span className="absolute inset-0 flex items-center justify-center text-sm font-bold text-gray-900">{plagiarismResult.plagiarismScore}%</span>
+                            </div>
+                            <div className="flex-1">
+                              <p className="text-xs font-semibold text-gray-700 mb-1">
+                                {plagiarismResult.plagiarismScore >= 30 ? 'Plagiasi terdeteksi' : 'Plagiasi rendah'}
+                              </p>
+                            </div>
+                          </div>
+
+                          {plagiarismResult.matchedSources.some((s) => s.score >= PLAGIARISM_HIGHLIGHT_THRESHOLD) && (
+                            <button
+                              type="button"
+                              onClick={handleAutoCorrectPlagiarism}
+                              disabled={plagiarismFixLoading}
+                              className="w-full px-3 py-2 text-[11px] font-semibold text-white rounded-lg bg-gradient-to-r from-orange-600 to-orange-500 hover:from-orange-700 hover:to-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-1.5 shadow-sm"
+                            >
+                              {plagiarismFixLoading ? (
+                                <><svg className="w-3.5 h-3.5 animate-spin" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#fff" strokeWidth="3" strokeOpacity="0.3" /><circle cx="12" cy="12" r="10" stroke="#fff" strokeWidth="3" strokeDasharray="31.4 62.8" strokeLinecap="round" /></svg> Memperbaiki...</>
+                              ) : (
+                                <><Sparkles className="w-3 h-3" /> Auto Correct Plagiarism</>
+                              )}
+                            </button>
+                          )}
+
+                          {plagiarismResult.explanation && (
+                            <div className="p-3 rounded-xl bg-gray-50 border border-gray-200">
+                              <p className="text-[10px] text-gray-700 leading-relaxed">{plagiarismResult.explanation}</p>
+                            </div>
+                          )}
+
+                          {plagiarismResult.matchedSources.length > 0 && (
+                            <div className="border border-gray-200 rounded-xl overflow-hidden">
+                              <div className="bg-gray-50 px-3 py-2 text-[10px] font-semibold text-gray-600 border-b border-gray-200">
+                                Sumber yang cocok
+                              </div>
+                              <div className="max-h-48 overflow-y-auto p-2 space-y-1">
+                                {plagiarismResult.matchedSources.map((s, i) => (
+                                  <div key={i} className="p-2 rounded-lg bg-gray-50">
+                                    <a href={s.url} target="_blank" rel="noreferrer" className="text-[10px] text-red-600 hover:underline block truncate">{s.url || 'Sumber tidak diketahui'}</a>
+                                    <p className="text-[10px] text-gray-600 mt-0.5 italic truncate">"{s.matchedText}"</p>
+                                    <span className="text-[9px] font-semibold text-gray-500">Kecocokan: {s.score}%</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
             {aiResults && (() => {
               const caseIssues = aiResults.results.filter((r) => r.id === 56 && r.status === 'failed' && r.problematic_text?.trim());
               if (caseIssues.length === 0) return null;
@@ -2490,7 +3261,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 <div className="text-[10px] text-gray-400 mb-3 leading-relaxed">
                   Klik item untuk lokasi kata. Klik <strong>Auto Correct</strong> di popup untuk perbaiki kapitalisasi.
                 </div>
-                <div className="space-y-1">
+                <div className="space-y-2">
                   {caseIssues.map((r, i) => (
                     <button key={i} type="button" onClick={() => focusIssue(r)}
                       className="w-full flex items-start gap-2.5 p-2.5 rounded-xl border border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50 transition text-left cursor-pointer group"
@@ -2531,54 +3302,36 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           >
             <div className="flex items-center justify-between p-5 border-b border-gray-200">
               <div className="flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-red-600" />
-                <span id="kw-modal-title" className="text-sm font-bold text-gray-900">Generate Keyword dengan AI</span>
+                <Globe className="w-5 h-5 text-red-600" />
+                <span id="kw-modal-title" className="text-sm font-bold text-gray-900">Keyword Analytics</span>
               </div>
               <button id="kw-modal-close" type="button" onClick={() => setShowKwPopup(false)} className="text-gray-300 hover:text-gray-500 transition text-2xl leading-none">×</button>
             </div>
 
             <div className="p-5 overflow-y-auto flex-1 min-h-0">
+              {kwGenLoading && !ahrefsMetrics.length && (
+                <div className="flex items-center justify-center gap-3 py-6">
+                  <Loader className="w-5 h-5 animate-spin text-red-600" />
+                  <span className="text-xs text-gray-500">AI menganalisis artikel & mengambil data Ahrefs...</span>
+                </div>
+              )}
+
               {kwGenError && (
                 <div id="kw-modal-error" className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{kwGenError}</div>
               )}
 
-              {kwSuggestions.length === 0 ? (
-                <div className="text-center py-6">
-                  <p id="kw-modal-desc" className="text-xs text-gray-500 mb-5 leading-relaxed">
-                    AI akan membaca seluruh artikel dan menyarankan 100+ keyword/keyword LSI yang relevan dengan topik.
-                    Anda bisa memilih beberapa keyword sekaligus.
-                  </p>
-                  <button
-                    id="kw-modal-generate"
-                    type="button"
-                    onClick={handleGenerateKeyword}
-                    disabled={kwGenLoading}
-                    className="w-full max-w-sm mx-auto py-2.5 rounded-xl text-sm font-semibold text-white bg-red-700 hover:bg-red-800 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-2 shadow-sm shadow-red-700/20"
-                  >
-                    {kwGenLoading ? <Loader className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                    {kwGenLoading ? 'Menganalisis artikel...' : 'Generate Keyword'}
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="relative flex-1">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                      <input
-                        id="kw-modal-search"
-                        type="text"
-                        value={kwSearch}
-                        onChange={(e) => setKwSearch(e.target.value)}
-                        placeholder="Cari keyword..."
-                        className="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-200"
-                      />
-                    </div>
+              {ahrefsMetrics.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-gray-500">
+                      {ahrefsMetrics.length} keyword · {selectedKeywords.size} dipilih
+                    </p>
                     <div className="flex gap-2">
                       <button
                         id="kw-modal-select-all"
                         type="button"
                         onClick={selectAllKeywords}
-                        className="px-3 py-2 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
+                        className="px-2.5 py-1 text-[10px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
                       >
                         Pilih semua
                       </button>
@@ -2586,42 +3339,70 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         id="kw-modal-deselect-all"
                         type="button"
                         onClick={deselectAllKeywords}
-                        className="px-3 py-2 text-xs font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
+                        className="px-2.5 py-1 text-[10px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
                       >
                         Batal pilih
                       </button>
                     </div>
                   </div>
 
-                  <p className="text-xs text-gray-500">
-                    Menampilkan {filteredKeywords.length} dari {kwSuggestions.length} keyword · {selectedKeywords.size} dipilih
-                  </p>
-
-                  <div className="border border-gray-100 rounded-xl overflow-hidden">
-                    <div className="max-h-[45vh] overflow-y-auto p-1">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
-                        {filteredKeywords.map((kw) => (
-                          <label
-                            key={kw}
-                            className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 cursor-pointer text-sm text-gray-700 transition"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={selectedKeywords.has(kw)}
-                              onChange={() => toggleKeyword(kw)}
-                              className="w-4 h-4 rounded border-gray-300 text-red-700 focus:ring-red-200"
-                            />
-                            <span className="truncate" title={kw}>{kw}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
+                  <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                    <table className="w-full text-[10px]">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                          <th className="w-8 px-2 py-2"></th>
+                          <th className="text-left px-2 py-2 font-semibold text-gray-600">Keyword</th>
+                          <th className="text-right px-2 py-2 font-semibold text-gray-600">Volume</th>
+                          <th className="text-right px-2 py-2 font-semibold text-gray-600">KD</th>
+                          <th className="text-right px-2 py-2 font-semibold text-gray-600">CPC</th>
+                          <th className="text-right px-2 py-2 font-semibold text-gray-600">Traffic</th>
+                          <th className="text-center px-2 py-2 font-semibold text-gray-600">Relevance /10</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ahrefsMetrics.map((m) => {
+                          const rel = computeRelevance(m.keyword, stripImages(article));
+                          const kdColor = m.keywordDifficulty >= 60 ? 'text-emerald-600' : m.keywordDifficulty >= 30 ? 'text-amber-600' : 'text-red-600';
+                          const relColor = rel >= 7 ? 'text-emerald-600' : rel >= 4 ? 'text-amber-600' : 'text-red-600';
+                          return (
+                          <tr key={m.keyword} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                            <td className="px-2 py-2">
+                              <input
+                                type="checkbox"
+                                checked={selectedKeywords.has(m.keyword)}
+                                onChange={() => toggleKeyword(m.keyword)}
+                                className="w-3.5 h-3.5 rounded border-gray-300 text-red-700 focus:ring-red-200"
+                              />
+                            </td>
+                            <td className="px-2 py-2 text-gray-800 font-medium truncate max-w-[140px]" title={m.keyword}>{m.keyword}</td>
+                            <td className="px-2 py-2 text-right text-gray-600">{m.searchVolume.toLocaleString()}</td>
+                            <td className="px-2 py-2 text-right">
+                              <span className={`font-semibold ${kdColor}`}>{m.keywordDifficulty}</span>
+                            </td>
+                            <td className="px-2 py-2 text-right text-gray-600">${m.cpc.toFixed(2)}</td>
+                            <td className="px-2 py-2 text-right text-gray-600">{m.trafficPotential.toLocaleString()}</td>
+                            <td className="px-2 py-2 text-center">
+                              <span className={`inline-flex items-center justify-center min-w-[44px] h-5 px-1.5 text-[9px] font-bold rounded-full ${relColor} bg-gray-50 border border-gray-200`} title={`Relevance ${rel}/10`}>{rel}/10</span>
+                            </td>
+                          </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
+                </div>
+              ) : !kwGenLoading && (
+                <div className="text-center py-8">
+                  <Globe className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                  <p className="text-xs text-gray-400 leading-relaxed">
+                    AI akan merekomendasikan keyword berdasarkan artikel Anda<br />
+                    dengan data analitik Ahrefs (Volume, KD, CPC, Traffic).
+                  </p>
                 </div>
               )}
             </div>
 
-            {kwSuggestions.length > 0 && (
+            {ahrefsMetrics.length > 0 && (
               <div className="p-5 border-t border-gray-200 flex justify-end gap-2">
                 <button
                   id="kw-modal-cancel"
@@ -2807,6 +3588,24 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         }
         .issue-highlight-ai:hover {
           background-color: rgba(252, 225, 138, 0.85);
+        }
+        .issue-highlight-detector {
+          background-color: rgba(196, 181, 253, 0.4);
+          border-bottom: 2px solid rgba(139, 92, 246, 0.4);
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight-detector:hover {
+          background-color: rgba(167, 139, 250, 0.55);
+        }
+        .issue-highlight-plagiarism {
+          background-color: rgba(251, 146, 60, 0.35);
+          border-bottom: 2px solid rgba(234, 88, 12, 0.4);
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight-plagiarism:hover {
+          background-color: rgba(251, 146, 60, 0.55);
         }
         @media (max-width: 767px) {
           .editor-surface { font-size: 15px; line-height: 1.7; }

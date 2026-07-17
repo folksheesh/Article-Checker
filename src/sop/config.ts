@@ -1,11 +1,41 @@
+/** ===========================================================
+ *  AI PROVIDER CONFIGURATION (Gemini — primary)
+ *  =========================================================== */
+
+/** Google Gemini API key. Used for AI evaluation, rewrite, chat, and keyword generation. */
+export const GEMINI_API_KEY = import.meta.env?.VITE_GEMINI_API_KEY ?? 'AQ.Ab8RN6IFnE5BXOZouWeeDSXsQ0qIEVEOxBrdbJk2iyPqKWoHQg';
+
+/** Gemini base URL. */
+export const GEMINI_BASE_URL = import.meta.env?.VITE_GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta';
+
+/** Default model for Gemini. */
+export const GEMINI_MODEL = import.meta.env?.VITE_GEMINI_MODEL ?? 'gemini-2.0-flash';
+
+/** ===========================================================
+ *  AI PROVIDER CONFIGURATION (OpenAI — fallback)
+ *  =========================================================== */
+
+/** OpenAI API key. Used for AI evaluation, rewrite, chat, and keyword generation. */
+export const OPENAI_API_KEY = import.meta.env?.VITE_OPENAI_API_KEY ?? '';
+
+/** OpenAI base URL. Default is official OpenAI endpoint. */
+export const OPENAI_BASE_URL = import.meta.env?.VITE_OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
+
+/** Default model for OpenAI. */
+export const OPENAI_MODEL = import.meta.env?.VITE_OPENAI_MODEL ?? 'gpt-4o-mini';
+
+/** Model for premium / complex tasks. */
+export const OPENAI_PREMIUM_MODEL = import.meta.env?.VITE_OPENAI_PREMIUM_MODEL ?? 'gpt-4o';
+
+/** ===========================================================
+ *  LEGACY OLLAMA CONFIGURATION (Fallback)
+ *  =========================================================== */
+
 /** API key for Ollama (or OpenAI-compatible) AI service. */
 export const OLLAMA_API_KEY = import.meta.env?.VITE_OLLAMA_API_KEY ?? '';
 
-/** Ollama server base URL.
- *  In dev, Vite proxies /ollama -> ollama.com to avoid CORS.
- *  In production, Vercel rewrites /ollama -> serverless function.
- *  Always use the proxy path; NEVER set this to an absolute URL in the frontend env. */
-export const OLLAMA_BASE_URL = '/ollama';
+/** Ollama server base URL. */
+export const OLLAMA_BASE_URL = import.meta.env?.VITE_OLLAMA_BASE_URL ?? '/ollama';
 
 /** Model name to use for AI evaluation / auto-correct. */
 export const OLLAMA_MODEL = import.meta.env?.VITE_OLLAMA_MODEL ?? 'gemma4:31b';
@@ -13,11 +43,66 @@ export const OLLAMA_MODEL = import.meta.env?.VITE_OLLAMA_MODEL ?? 'gemma4:31b';
 /** Whether to skip the Authorization header (local Ollama doesn't need one). */
 export const OLLAMA_SKIP_AUTH = import.meta.env?.VITE_OLLAMA_SKIP_AUTH === 'true';
 
+/** ===========================================================
+ *  AHRFFS KEYWORD ANALYTICS API
+ *  =========================================================== */
+
+/** Ahrefs API token. Required for keyword analytics dashboard. */
+export const AHREFS_API_KEY = import.meta.env?.VITE_AHREFS_API_KEY ?? 'dgNQ6mJga_7eK-bG1S12WthNqIzrxDaZWAA26xvu';
+
+/** Ahrefs API v3 base URL. */
+export const AHREFS_BASE_URL = import.meta.env?.VITE_AHREFS_BASE_URL ?? 'https://api.ahrefs.com/v3';
+
+/** Default country for keyword data. */
+export const AHREFS_DEFAULT_COUNTRY = import.meta.env?.VITE_AHREFS_DEFAULT_COUNTRY ?? 'id';
+
+/** ===========================================================
+ *  AI CONTENT DETECTOR APIs
+ *  =========================================================== */
+
+/** GPTZero API key. Free tier 10,000 words/month. */
+export const GPTZERO_API_KEY = import.meta.env?.VITE_GPTZERO_API_KEY ?? '';
+
+/** GPTZero base URL. */
+export const GPTZERO_BASE_URL = import.meta.env?.VITE_GPTZERO_BASE_URL ?? 'https://api.gptzero.me/v1';
+
+/** Hugging Face access token. For chatgpt-detector-roberta model (free). */
+export const HUGGINGFACE_API_KEY = import.meta.env?.VITE_HUGGINGFACE_API_KEY ?? '';
+
+/** Hugging Face inference endpoint for AI detection. */
+export const HUGGINGFACE_MODEL = import.meta.env?.VITE_HUGGINGFACE_MODEL ?? 'chatgpt-detector-roberta';
+
+/** ===========================================================
+ *  PLAGIARISM CHECKER APIs
+ *  =========================================================== */
+
+/** Provider for plagiarism checker. Options: 'copyleaks' | 'rapidapi'. */
+export const PLAGIARISM_PROVIDER = import.meta.env?.VITE_PLAGIARISM_PROVIDER ?? 'copyleaks';
+
+/** Copyleaks API key. */
+export const COPYLEAKS_API_KEY = import.meta.env?.VITE_COPYLEAKS_API_KEY ?? '';
+
+/** Copyleaks base URL. */
+export const COPYLEAKS_BASE_URL = import.meta.env?.VITE_COPYLEAKS_BASE_URL ?? 'https://api.copyleaks.com';
+
+/** RapidAPI key for plagiarism checker. */
+export const RAPIDAPI_KEY = import.meta.env?.VITE_RAPIDAPI_KEY ?? '020bb894ecmshd7789544617fa20p151db6jsn0b9f610c97c9';
+
+/** RapidAPI plagiarism host. */
+export const RAPIDAPI_PLAGIARISM_HOST = import.meta.env?.VITE_RAPIDAPI_PLAGIARISM_HOST ?? 'plagiarism-checker-and-auto-citation-generator-multi-lingual.p.rapidapi.com';
+
+/** ===========================================================
+ *  REQUEST TIMEOUTS
+ *  =========================================================== */
+
 /** Request timeouts in milliseconds. */
 export const AI_EVAL_TIMEOUT_MS = 45_000;
 export const AI_REWRITE_TIMEOUT_MS = 45_000;
 export const AI_KEYWORD_TIMEOUT_MS = 45_000;
 export const AI_CHAT_TIMEOUT_MS = 60_000;
+export const AI_DETECTOR_TIMEOUT_MS = 30_000;
+export const PLAGIARISM_TIMEOUT_MS = 60_000;
+export const AHREFS_TIMEOUT_MS = 30_000;
 
 /** Maximum number of undo snapshots to keep. */
 export const UNDO_STACK_LIMIT = 20;

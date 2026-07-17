@@ -3,8 +3,8 @@ import {
   LEAD_TARGET_WORDS,
   MAX_META_DESC_CHARS,
   MAX_META_TITLE_CHARS,
-  MAX_SENTENCES_PER_PARAGRAPH,
   MAX_TITLE_CHARS,
+  MAX_SENTENCES_PER_PARAGRAPH,
   MIN_INTERNAL_LINKS,
   MIN_SUGGESTED_POSTS,
   SOP_QUESTIONS,
@@ -12,8 +12,9 @@ import {
 import { countSentences, countWords, parseArticle } from './parser';
 import { runSopChecks, getPrimaryKeyword } from './sopRules';
 import type { ArticleInput, CheckResult, RuleId } from './types';
-import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH, AI_REWRITE_TIMEOUT_MS, AI_KEYWORD_TIMEOUT_MS } from './config';
+import { AI_REWRITE_TIMEOUT_MS, AI_KEYWORD_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
+import { callChatCompletion } from './apis/openai';
 
 export interface ReviseResult {
   article: string;
@@ -48,7 +49,6 @@ function replaceTitle(article: string, newTitle: string): string {
 function replaceLead(article: string, newLead: string): string {
   const parsed = parseArticle(article);
   if (!parsed.lead) {
-    // Insert after title
     const lines = article.split(/\r?\n/);
     const h1Idx = lines.findIndex((l) => /^#\s+/.test(l.trim()));
     if (h1Idx >= 0) {
@@ -139,11 +139,9 @@ function ensureLinks(article: string): string {
   const hasSuggested = /baca juga|suggested|artikel terkait/i.test(article);
   if (!hasSuggested || linkCount < MIN_INTERNAL_LINKS + MIN_SUGGESTED_POSTS) {
     const block = [
-
       'Baca juga: [Artikel Terkait 1](#), [Artikel Terkait 2](#), [Artikel Terkait 3](#)',
       'Internal Link: [Layanan Kami](#), [Panduan Lengkap](#)',
     ].join('\n');
-    // Place before last paragraph if CTA-ish, else append
     const lines = next.split(/\r?\n/);
     const lastContentIdx = [...lines]
       .map((l, i) => ({ l, i }))
@@ -169,11 +167,9 @@ function ensureAltText(article: string, _keyword: string): string {
         next = next.replace(img.raw, '');
       }
     }
-    // If any images remain with good alt text, keep them
     const remaining = parseArticle(next);
     if (remaining.images.length > 0) return next;
   }
-  // No usable images — nothing to fix deterministically
   return article;
 }
 
@@ -189,7 +185,6 @@ function ensureCta(article: string, keyword: string): string {
 
 function ensureAnda(article: string): string {
   if (/\bAnda\b/.test(article)) return article;
-  // Soft insert on lead if present
   const parsed = parseArticle(article);
   if (parsed.lead) {
     const lead = parsed.lead.replace(/\bpembaca\b/gi, 'Anda').replace(/\bklien\b/gi, 'Anda');
@@ -327,7 +322,7 @@ function applyDeterministicFix(
       article = fixDoubleSpaces(article);
       return { article, metaTitle, metaDesc, handled: true };
     case 12:
-      return { article, metaTitle, metaDesc, handled: true }; // deferred — no change
+      return { article, metaTitle, metaDesc, handled: true };
     case 13:
       article = ensureLinks(article);
       return { article, metaTitle, metaDesc, handled: true };
@@ -351,9 +346,9 @@ function applyDeterministicFix(
   }
 }
 
-const OLLAMA_IDS: RuleId[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20];
+const AI_REWRITE_IDS: RuleId[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20];
 
-async function callOllamaRewrite(
+async function callAIRewrite(
   apiKey: string,
   input: ArticleInput,
   item: CheckResult,
@@ -366,7 +361,6 @@ async function callOllamaRewrite(
     ? `\n\nCATATAN: Percobaan sebelumnya belum berhasil memperbaiki. Pastikan perubahan benar-benar mengatasi kriteria "${item.question}". Fokus pada teks yang tepat dan ukur hasilnya dengan saksama.`
     : '';
 
-  // Extract images so the AI can preserve their positions without seeing base64 data
   const images: string[] = [];
   let articleWithTokens = input.article.replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => {
     images.push(m);
@@ -404,45 +398,21 @@ Kembalikan JSON:
   const cleanMetaDesc = stripImages(input.metaDesc || '');
   const userPrompt = `Meta Title: ${cleanMetaTitle}\nMeta Desc: ${cleanMetaDesc}\nArtikel:\n${articleWithTokens}`;
 
-  const headers2: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers2['Authorization'] = `Bearer ${apiKey}`;
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_REWRITE_TIMEOUT_MS);
-
-  const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
-    method: 'POST',
-    headers: headers2,
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      stream: false,
-      temperature: 0.2,
-    }),
-    signal: controller.signal,
+  const { content } = await callChatCompletion({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    temperature: 0.2,
+    timeoutMs: AI_REWRITE_TIMEOUT_MS,
+    apiKey,
   });
 
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `API Error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const resultText = data.choices?.[0]?.message?.content || '{}';
-  const parsed = JSON.parse(resultText.replace(/```json/gi, '').replace(/```/gi, '').trim());
+  const parsed = JSON.parse(content);
   let outArticle = typeof parsed.article === 'string' ? parsed.article : input.article;
-  // Restore image tokens in their original positions
   images.forEach((img, i) => {
     outArticle = outArticle.replace(`[[GAMBAR_${i}]]`, img);
   });
-  // If some tokens were lost, append remaining images at the end as fallback
   let missingIdx = 0;
   while (outArticle.includes(`[[GAMBAR_${missingIdx}]]`)) missingIdx++;
   for (let i = missingIdx; i < images.length; i++) {
@@ -480,7 +450,6 @@ export async function callOllamaGenerateKeyword(
   apiKey: string,
   article: string,
 ): Promise<string> {
-  const effectiveApiKey = apiKey.trim() || OLLAMA_API_KEY;
   const systemPrompt = `Anda adalah asisten SEO Konten Hukum.
 Tugas Anda memahami topik dan konteks dari seluruh artikel, lalu menghasilkan 1 (satu) keyword utama yang paling relevan.
 
@@ -495,39 +464,17 @@ Aturan:
     ? clean.slice(0, 8000) + '\n\n...[artikel terpotong]'
     : clean;
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (effectiveApiKey) {
-    headers['Authorization'] = `Bearer ${effectiveApiKey}`;
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_KEYWORD_TIMEOUT_MS);
-
-  const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Artikel:\n${truncated}` },
-      ],
-      stream: false,
-      temperature: 0.3,
-    }),
-    signal: controller.signal,
+  const { content } = await callChatCompletion({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Artikel:\n${truncated}` },
+    ],
+    temperature: 0.3,
+    timeoutMs: AI_KEYWORD_TIMEOUT_MS,
+    apiKey,
   });
 
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `API Error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content || '{}';
-  const parsed = JSON.parse(text.replace(/```json/gi, '').replace(/```/gi, '').trim());
+  const parsed = JSON.parse(content);
   return typeof parsed.keyword === 'string' ? parsed.keyword.trim() : '';
 }
 
@@ -535,7 +482,6 @@ export async function callOllamaGenerateKeywords(
   apiKey: string,
   article: string,
 ): Promise<string[]> {
-  const effectiveApiKey = apiKey.trim() || OLLAMA_API_KEY;
   const systemPrompt = `Anda adalah asisten SEO Konten Hukum.
 Tugas Anda memahami topik dan konteks dari seluruh artikel, lalu menghasilkan DAFTAR BESAR keyword/keyword LSI yang relevan untuk artikel tersebut.
 
@@ -553,39 +499,17 @@ Aturan:
     ? clean.slice(0, 8000) + '\n\n...[artikel terpotong]'
     : clean;
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (effectiveApiKey) {
-    headers['Authorization'] = `Bearer ${effectiveApiKey}`;
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_KEYWORD_TIMEOUT_MS);
-
-  const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Artikel:\n${truncated}` },
-      ],
-      stream: false,
-      temperature: 0.5,
-    }),
-    signal: controller.signal,
+  const { content } = await callChatCompletion({
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Artikel:\n${truncated}` },
+    ],
+    temperature: 0.5,
+    timeoutMs: AI_KEYWORD_TIMEOUT_MS,
+    apiKey,
   });
 
-  clearTimeout(timeout);
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `API Error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  const text = data.choices?.[0]?.message?.content || '{}';
-  const parsed = JSON.parse(text.replace(/```json/gi, '').replace(/```/gi, '').trim());
+  const parsed = JSON.parse(content);
   if (Array.isArray(parsed.keywords)) {
     return parsed.keywords
       .map((k: unknown) => (typeof k === 'string' ? k.trim() : ''))
@@ -610,34 +534,31 @@ export async function autoReviseItem(
     };
   }
 
-  const effectiveApiKey = apiKey.trim() || OLLAMA_API_KEY;
+  const effectiveApiKey = apiKey.trim();
   let newKeyword: string | undefined;
 
-  // For keyword issues, try generating a better keyword first
-  if (KEYWORD_IDS.includes(item.id) && (effectiveApiKey || OLLAMA_SKIP_AUTH)) {
+  if (KEYWORD_IDS.includes(item.id)) {
     try {
       newKeyword = await callOllamaGenerateKeyword(effectiveApiKey, input.article);
     } catch {
-      // fall through — keep using original keyword
+      // fall through
     }
   }
 
   const kw = getPrimaryKeyword(newKeyword || input.keyword);
 
-  // 1) Deterministic patch using the (possibly new) keyword
   let { article, metaTitle, metaDesc } = applyDeterministicFix(
     { article: input.article, keyword: kw, metaTitle: input.metaTitle, metaDesc: input.metaDesc },
     item,
   );
   let usedGemini = false;
 
-  // 2) Re-check; if still failing and Ollama allowed, rewrite (up to 2 attempts)
   let report = runSopChecks({ article, keyword: kw, metaTitle, metaDesc });
   let stillFailing = report.items.find((r) => r.id === item.id)?.status === 'failed';
 
-  if (stillFailing && OLLAMA_IDS.includes(item.id) && (effectiveApiKey || OLLAMA_SKIP_AUTH)) {
+  if (stillFailing && AI_REWRITE_IDS.includes(item.id)) {
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const rewritten = await callOllamaRewrite(
+      const rewritten = await callAIRewrite(
         effectiveApiKey,
         { article, keyword: kw, metaTitle, metaDesc },
         item,
@@ -650,12 +571,10 @@ export async function autoReviseItem(
         kw,
       ));
       usedGemini = true;
-      // Re-apply deterministic safety nets after each attempt
       ({ article, metaTitle, metaDesc } = applyDeterministicFix(
         { article, keyword: kw, metaTitle, metaDesc },
         item,
       ));
-      // Re-check; if passed, stop
       report = runSopChecks({ article, keyword: kw, metaTitle, metaDesc });
       stillFailing = report.items.find((r) => r.id === item.id)?.status === 'failed';
       if (!stillFailing) break;
@@ -682,7 +601,6 @@ export async function autoReviseItem(
   };
 }
 
-// Helper exported for tests / debugging
 export function _debugCounts(text: string) {
   return { words: countWords(text), sentences: countSentences(text) };
 }

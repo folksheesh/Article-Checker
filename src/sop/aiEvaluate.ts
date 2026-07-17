@@ -1,7 +1,8 @@
 import type { CheckResult, AiEvaluationOutput, SubScores } from './types';
 import { SOP_QUESTIONS } from './constants';
-import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH, AI_EVAL_TIMEOUT_MS } from './config';
+import { AI_EVAL_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
+import { callChatCompletion } from './apis/openai';
 
 export interface AiEvaluationInput {
   article: string;
@@ -15,7 +16,7 @@ const EMPTY_SUB_SCORES: SubScores = { seo: 0, structure: 0, intent: 0, tone: 0 }
 const FALLBACK_OUTPUT: AiEvaluationOutput = {
   results: [],
   subScores: EMPTY_SUB_SCORES,
-  bestNextMove: 'Tambahkan API key Ollama untuk mengaktifkan evaluasi AI.',
+  bestNextMove: 'Tambahkan API key OpenAI untuk mengaktifkan evaluasi AI.',
 };
 
 function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
@@ -25,7 +26,7 @@ function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
     question: SOP_QUESTIONS[id],
     status: 'deferred',
     passed: true,
-    reason: fallbackReason || 'Tambahkan API key Ollama untuk mengaktifkan evaluasi AI.',
+    reason: fallbackReason || 'Tambahkan API key OpenAI untuk mengaktifkan evaluasi AI.',
     problematic_text: '',
     source: 'ai' as const,
   }));
@@ -36,12 +37,7 @@ function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
   };
 }
 
-export async function evaluateWithAI(input: AiEvaluationInput, _apiKey: string, signal?: AbortSignal): Promise<AiEvaluationOutput> {
-  const apiKey = _apiKey.trim() || OLLAMA_API_KEY;
-  if (!apiKey.trim() && !OLLAMA_SKIP_AUTH) {
-    return buildSkippedOutput();
-  }
-
+export async function evaluateWithAI(input: AiEvaluationInput, apiKey = '', signal?: AbortSignal): Promise<AiEvaluationOutput> {
   const systemPrompt = `Anda adalah Editor Senior dan Ahli Hukum Konten Digital Indonesia.
 Tugas Anda mengevaluasi artikel hukum berdasarkan 5 kriteria kualitas berikut. Keluarkan hasil HANYA dalam format JSON.
 
@@ -100,43 +96,18 @@ ARTIKEL:
 ${truncatedArticle}`;
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) {
-      headers['Authorization'] = `Bearer ${apiKey}`;
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), AI_EVAL_TIMEOUT_MS);
-    if (signal) {
-      signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
-
-    const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-        stream: false,
-        temperature: 0.2,
-      }),
-      signal: controller.signal,
+    const { content } = await callChatCompletion({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.2,
+      timeoutMs: AI_EVAL_TIMEOUT_MS,
+      signal,
+      apiKey,
     });
 
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`AI request failed: ${response.status}${body ? ` — ${body.slice(0, 200)}` : ''}`);
-    }
-
-    const data = await response.json();
-    const resultText = data.choices?.[0]?.message?.content ?? '';
-    const cleaned = resultText.replace(/```json/gi, '').replace(/```/gi, '').trim();
-    const parsed = JSON.parse(cleaned);
+    const parsed = JSON.parse(content);
 
     const results: CheckResult[] = (parsed.results || []).map((r: any) => {
       const id = Number(r.id) as 51 | 52 | 53 | 54 | 55 | 56;

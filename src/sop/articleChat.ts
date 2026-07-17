@@ -1,5 +1,6 @@
-import { OLLAMA_API_KEY, OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_SKIP_AUTH, AI_CHAT_TIMEOUT_MS } from './config';
+import { AI_CHAT_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
+import { callChatCompletion } from './apis/openai';
 
 const SYSTEM_PROMPT = `Anda adalah asisten penulis artikel hukum Indonesia. Tugas Anda membantu user menulis dan menyempurnakan artikel mereka.
 
@@ -27,14 +28,8 @@ export interface ChatResponse {
 export async function callArticleChat(
   article: string,
   userPrompt: string,
+  apiKey = '',
 ): Promise<ChatResponse> {
-  const apiKey = OLLAMA_API_KEY;
-  if (!apiKey.trim() && !OLLAMA_SKIP_AUTH) {
-    throw new Error('API key tidak tersedia. Tambahkan VITE_OLLAMA_API_KEY di .env');
-  }
-
-  // Extract images into placeholder tokens. The current model may not support
-  // image input, so we strip image data before sending and restore it afterward.
   const images: string[] = [];
   let articleForAi = article.replace(/!\[[^\]]*\]\([^)]*\)/g, (m) => {
     images.push(m);
@@ -42,64 +37,34 @@ export async function callArticleChat(
   });
   articleForAi = stripImages(articleForAi);
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) {
-    headers['Authorization'] = `Bearer ${apiKey}`;
+  const { content } = await callChatCompletion({
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPESAN USER:\n${stripImages(userPrompt)}`,
+      },
+    ],
+    temperature: 0.4,
+    timeoutMs: AI_CHAT_TIMEOUT_MS,
+    apiKey,
+  });
+
+  let resultText = content.trim();
+
+  images.forEach((img, i) => {
+    resultText = resultText.split(`[[GAMBAR_${i}]]`).join(img);
+  });
+  resultText = resultText.replace(/\[\[GAMBAR_\d+\]\]/g, '');
+
+  if (resultText.startsWith('[ARTICLE]')) {
+    return { type: 'article', content: resultText.replace(/^\[ARTICLE\]\s*/, '').trim() };
   }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), AI_CHAT_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `ARTIKEL SAAT INI:\n${articleForAi}\n\nPESAN USER:\n${stripImages(userPrompt)}`,
-          },
-        ],
-        stream: false,
-        temperature: 0.4,
-      }),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`Gagal menghubungi AI: ${response.status}${body ? ` — ${body.slice(0, 200)}` : ''}`);
-    }
-
-    const data = await response.json();
-    let resultText: string = data.choices?.[0]?.message?.content ?? '';
-    resultText = resultText.trim();
-
-    // Restore original images from placeholders
-    images.forEach((img, i) => {
-      resultText = resultText.split(`[[GAMBAR_${i}]]`).join(img);
-    });
-    resultText = resultText.replace(/\[\[GAMBAR_\d+\]\]/g, '');
-
-    // Determine response type
-    if (resultText.startsWith('[ARTICLE]')) {
-      return { type: 'article', content: resultText.replace(/^\[ARTICLE\]\s*/, '').trim() };
-    }
-    if (resultText.startsWith('[ANSWER]')) {
-      return { type: 'answer', content: resultText.replace(/^\[ANSWER\]\s*/, '').trim() };
-    }
-    // Fallback: if it looks like markdown with headings, treat as article
-    if (/^#{1,3}\s/m.test(resultText) || resultText.includes('\n---\n')) {
-      return { type: 'article', content: resultText };
-    }
-    return { type: 'answer', content: resultText };
-  } catch (err) {
-    clearTimeout(timeout);
-    throw err;
+  if (resultText.startsWith('[ANSWER]')) {
+    return { type: 'answer', content: resultText.replace(/^\[ANSWER\]\s*/, '').trim() };
   }
+  if (/^#{1,3}\s/m.test(resultText) || resultText.includes('\n---\n')) {
+    return { type: 'article', content: resultText };
+  }
+  return { type: 'answer', content: resultText };
 }
