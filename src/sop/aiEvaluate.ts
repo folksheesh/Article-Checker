@@ -48,18 +48,25 @@ ATURAN EVALUASI:
 4. CTA persuasif dan relevan dengan topik.
 5. Pembukaan dan penutup kuat serta memberikan kesan profesional.
 6. Pemakaian huruf kapital sudah benar (awal kalimat, proper noun, akronim, "Anda").
+7. Cek typo ejaan kata per kata — cari kata yang salah eja (bukan kalimat, tapi kata per kata). Jika ditemukan, buat item evaluasi dengan kategori "Error" dan set exact_word ke kata yang salah. Contoh: "wajibupdate" → "wajib update", "perusahaananda" → "perusahaan Anda", "darii" → "dari", "yangg" → "yang".
 
 WEAK WORDS CHECK:
 - Cari kata lemah: "mungkin", "saja", "hanya"
 - Jika ditemukan, buat item evaluasi dengan kategori "Error"
 
 LEGISLATIVE VALIDATION:
-- Referensi UU bersifat OPSIONAL. JANGAN flag ketiadaan UU sebagai error.
-- Jika ada referensi UU yang tidak relevan dengan topik artikel, beri saran informasi.
-- Jika tidak ada UU, jangan buat item evaluasi untuk ini.
+- Ekstrak semua referensi regulasi dari artikel (UU, PP, Permen, Peraturan, dll) beserta tahun/nomornya.
+- Untuk SETIAP referensi yang ditemukan, validasi apakah masih berlaku saat ini (2026).
+- Jika ada referensi yang sudah dicabut/diganti/tidak berlaku, beri "Error" dan jelaskan.
+- Jika semua referensi valid, beri "passed".
+- Jika tidak ada referensi regulasi sama sekali, JANGAN buat item — flag ketiadaan UU bukan error.
+- Contoh validasi:
+  * "UU 19/2016" → masih berlaku (tentang ITE)
+  * "UU 11/2008" → sudah diganti UU 19/2016
+  * "Permendag 19/2026" → perlu dicek apakah masih berlaku
 
 CLASSIFICATION:
-- Error: masalah yang bisa di-highlight ke kata spesifik di artikel (weak words, kapitalisasi salah, dll)
+- Error: masalah yang bisa di-highlight ke kata spesifik di artikel (typo ejaan, weak words, kapitalisasi salah, dll)
 - Information: masalah konseptual/missing (CTA tidak ada, UU tidak relevan) — beri auto_correct_button: true
 
 Skema JSON output:

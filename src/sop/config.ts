@@ -38,7 +38,7 @@ export const OLLAMA_API_KEY = import.meta.env?.VITE_OLLAMA_API_KEY ?? '';
 export const OLLAMA_BASE_URL = import.meta.env?.VITE_OLLAMA_BASE_URL ?? '/ollama';
 
 /** Model name to use for AI evaluation / auto-correct. */
-export const OLLAMA_MODEL = import.meta.env?.VITE_OLLAMA_MODEL ?? 'gemma4:31b';
+export const OLLAMA_MODEL = import.meta.env?.VITE_OLLAMA_MODEL ?? 'qwen2.5:14b';
 
 /** Whether to skip the Authorization header (local Ollama doesn't need one). */
 export const OLLAMA_SKIP_AUTH = import.meta.env?.VITE_OLLAMA_SKIP_AUTH === 'true';
@@ -51,7 +51,7 @@ export const OLLAMA_SKIP_AUTH = import.meta.env?.VITE_OLLAMA_SKIP_AUTH === 'true
 export const AHREFS_API_KEY = import.meta.env?.VITE_AHREFS_API_KEY ?? 'dgNQ6mJga_7eK-bG1S12WthNqIzrxDaZWAA26xvu';
 
 /** Ahrefs API v3 base URL. */
-export const AHREFS_BASE_URL = import.meta.env?.VITE_AHREFS_BASE_URL ?? 'https://api.ahrefs.com/v3';
+export const AHREFS_BASE_URL = import.meta.env.DEV ? '/ahrefs-api' : (import.meta.env?.VITE_AHREFS_BASE_URL ?? 'https://api.ahrefs.com/v3');
 
 /** Default country for keyword data. */
 export const AHREFS_DEFAULT_COUNTRY = import.meta.env?.VITE_AHREFS_DEFAULT_COUNTRY ?? 'id';

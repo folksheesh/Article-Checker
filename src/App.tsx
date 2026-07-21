@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import * as pdfjs from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -81,6 +81,7 @@ const CATEGORIES = [
 ];
 
 const SUGGESTED_LABELS: Record<number, string> = {
+  1: 'Pertahankan judul yang spesifik dan catchy. Hindari judul yang terlalu umum, tetapi tidak wajib memakai angka.',
   3: 'Buat lead 2 kalimat / ~12 kata yang langsung ke inti masalah.',
   4: 'Tambahkan alasan mengapa masalah ini penting/urgent di paragraf setelah lead.',
   8: 'Pecah paragraf panjang menjadi maksimal 3 kalimat per paragraf.',
@@ -450,8 +451,12 @@ export default function App() {
   const [activeStyles, setActiveStyles] = useState<ActiveStyleState | null>(null);
   const [evaluationAccuracy, setEvaluationAccuracy] = useState<EvaluationAccuracy | null>(null);
   const [ignoredIds, setIgnoredIds] = useState<Set<number>>(new Set());
+  const ignoredIdsRef = useRef<Set<number>>(new Set());
   const [hasChecked, setHasChecked] = useState(false);
+  const [focusIndices, setFocusIndices] = useState<Record<number, number>>({});
   const highlightsBlockedRef = useRef(true);
+
+  useEffect(() => { ignoredIdsRef.current = ignoredIds; }, [ignoredIds]);
 
   const chatRef = useRef<HTMLDivElement>(null);
 
@@ -462,6 +467,7 @@ export default function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const imgToolbarRef = useRef<HTMLDivElement>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const popupRef = useRef<HTMLDivElement>(null);
   const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const analysisAbortRef = useRef<AbortController | null>(null);
   const isUpdatingFromCodeRef = useRef(false);
@@ -591,8 +597,8 @@ export default function App() {
       const rect = target.getBoundingClientRect();
       setHover((prev) => {
         if (!prev) return null;
-        const above = rect.top - 48 >= 0;
-        const pos = positionPopupFor(rect, 288, 250, above, 48);
+        const above = rect.top - 10 >= 0;
+        const pos = positionPopupFor(rect, 288, 250, above, 10);
         return { ...prev, x: pos.x, y: pos.y };
       });
     };
@@ -610,24 +616,24 @@ export default function App() {
   }, [article, keyword, metaTitle, metaDesc]);
 
   useEffect(() => {
-    if (!editorRef.current) return;
+    if (!editorRef.current || !hasChecked) return;
     requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
-  }, [activeEvalTab]);
+  }, [activeEvalTab, hasChecked]);
 
   useEffect(() => {
-    if (!editorRef.current || activeEvalTab !== 'sop') return;
+    if (!editorRef.current || activeEvalTab !== 'sop' || !hasChecked) return;
     requestAnimationFrame(() => applyHighlights());
   }, [report, liveReport, hasChecked, aiResults, activeEvalTab]);
 
   useEffect(() => {
-    if (!editorRef.current || activeEvalTab !== 'ai-detector') return;
+    if (!editorRef.current || activeEvalTab !== 'ai-detector' || !hasChecked) return;
     requestAnimationFrame(() => applyHighlights(undefined, 'ai-detector'));
-  }, [aiDetectorResult, activeEvalTab]);
+  }, [aiDetectorResult, activeEvalTab, hasChecked]);
 
   useEffect(() => {
-    if (!editorRef.current || activeEvalTab !== 'plagiarism') return;
+    if (!editorRef.current || activeEvalTab !== 'plagiarism' || !hasChecked) return;
     requestAnimationFrame(() => applyHighlights(undefined, 'plagiarism'));
-  }, [plagiarismResult, activeEvalTab]);
+  }, [plagiarismResult, activeEvalTab, hasChecked]);
 
   // Compute evaluation accuracy whenever results change
   useEffect(() => {
@@ -711,6 +717,23 @@ export default function App() {
       }
     }
   }, [selectedImgInfo]);
+
+  // Adjust popup position based on actual rendered dimensions
+  useLayoutEffect(() => {
+    const el = popupRef.current;
+    const target = hoverTargetRef.current;
+    if (!el || !target || !hover) return;
+    const rect = target.getBoundingClientRect();
+    const ph = el.offsetHeight;
+    const pw = el.offsetWidth;
+    const gap = 10;
+    const m = 8;
+    let cy = rect.top - ph - gap;
+    if (cy < m) cy = rect.bottom + gap;
+    if (cy + ph + m > window.innerHeight) cy = Math.max(m, window.innerHeight - ph - m);
+    el.style.left = `${clampPopupX(rect.left + rect.width / 2, pw)}px`;
+    el.style.top = `${cy}px`;
+  }, [hover]);
 
   // Auto-scroll chat to bottom on new messages
   useEffect(() => {
@@ -800,12 +823,17 @@ export default function App() {
     if (y + ph + m > window.innerHeight) y = window.innerHeight - ph - m;
     return Math.max(m, y);
   };
-  const positionPopupFor = (rect: DOMRect, width: number, height: number, above: boolean, gap: number) => {
-    const cx = rect.left + rect.width / 2;
-    let cy = above ? rect.top - gap : rect.bottom + gap;
-    cy = clampPopupY(cy, height);
-    if (above && cy < 8) cy = clampPopupY(rect.bottom + gap, height);
-    return { x: clampPopupX(cx, width), y: cy };
+  const positionPopupFor = (rect: DOMRect, _width: number, height: number, above: boolean, gap: number) => {
+    const m = 8;
+    let cy: number;
+    if (above) {
+      cy = rect.top - height - gap;
+      if (cy < m) cy = rect.bottom + gap;
+    } else {
+      cy = rect.bottom + gap;
+    }
+    if (cy + height + m > window.innerHeight) cy = Math.max(m, window.innerHeight - height - m);
+    return { x: clampPopupX(rect.left + rect.width / 2, _width), y: cy };
   };
 
   const showIssuePopup = (target: HTMLElement) => {
@@ -847,8 +875,8 @@ export default function App() {
 
     hoverTargetRef.current = target;
     const rect = target.getBoundingClientRect();
-    const above = rect.top - 48 >= 0;
-    const pos = positionPopupFor(rect, 288, 250, above, 48);
+    const above = rect.top - 10 >= 0;
+    const pos = positionPopupFor(rect, 288, 250, above, 10);
     setHover({
       ...popup,
       x: pos.x,
@@ -939,7 +967,6 @@ export default function App() {
   };
 
   const applyHighlights = (reportOverride?: SopReport, modeOverride?: HighlightMode) => {
-    if (highlightsBlockedRef.current) return;
     const handle = editorRef.current;
     if (!handle) return;
 
@@ -947,6 +974,7 @@ export default function App() {
     if (!editorEl) return;
 
     const mode = modeOverride ?? activeEvalTab;
+    if (highlightsBlockedRef.current && mode !== 'sop') return;
 
     // Save selection as text offset
     const selection = window.getSelection();
@@ -990,51 +1018,62 @@ export default function App() {
         }
       }
 
+      reportToApply = {
+        ...reportToApply,
+        items: reportToApply.items.filter((item) => !ignoredIds.has(item.id)),
+      };
+
       const issues = reportToApply.items.filter(
         (item) => item.problematic_text?.trim().length > 0,
       );
       for (const issue of issues) {
-        let m: { start: number; end: number } | null = null;
+        const texts = issue.problematic_text.split('|||');
+        for (const pt of texts) {
+          if (!pt.trim()) continue;
+          let m: { start: number; end: number } | null = null;
 
-        // For AI items with target_highlight, try sentence_context first then exact_word
-        if (issue.source === 'ai' && issue.target_highlight) {
-          const ctx = issue.target_highlight.sentence_context;
-          const word = issue.target_highlight.exact_word;
-          if (ctx && word) {
-            m = findTextMatch(highlightedMd, ctx);
-            if (m) {
-              // Found the sentence; now narrow to the exact word within it
-              const sentenceText = highlightedMd.slice(m.start, m.end);
-              const wordIdx = sentenceText.indexOf(word);
-              if (wordIdx >= 0) {
-                m = { start: m.start + wordIdx, end: m.start + wordIdx + word.length };
+          // For AI items with target_highlight, try sentence_context first then exact_word
+          if (issue.source === 'ai' && issue.target_highlight) {
+            const ctx = issue.target_highlight.sentence_context;
+            const word = issue.target_highlight.exact_word;
+            if (ctx && word) {
+              m = findTextMatch(highlightedMd, ctx);
+              if (m) {
+                const sentenceText = highlightedMd.slice(m.start, m.end);
+                const wordIdx = sentenceText.indexOf(word);
+                if (wordIdx >= 0) {
+                  m = { start: m.start + wordIdx, end: m.start + wordIdx + word.length };
+                }
               }
             }
+            if (!m) {
+              m = findTextMatch(highlightedMd, word || pt);
+            }
+          } else {
+            m = findTextMatch(highlightedMd, pt);
           }
-          if (!m) {
-            m = findTextMatch(highlightedMd, word || issue.problematic_text);
-          }
-        } else {
-          m = findTextMatch(highlightedMd, issue.problematic_text);
-        }
 
-        if (!m) continue;
-        let cls: string;
-        if (issue.source === 'ai') {
-          cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-ai';
-        } else {
-          cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
+          if (!m) continue;
+          const isIgnored = ignoredIdsRef.current.has(issue.id);
+          let cls: string;
+          if (isIgnored) {
+            cls = 'issue-highlight-ignored';
+          } else if (issue.source === 'ai') {
+            cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-ai';
+          } else {
+            cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
+          }
+          ranges.push({
+            start: m.start,
+            end: m.end,
+            cls,
+            kind: 'sop',
+            label: issue.question,
+            reason: issue.reason,
+            text: issue.problematic_text,
+            issueIds: [issue.id],
+          });
         }
-        ranges.push({
-          start: m.start,
-          end: m.end,
-          cls,
-          kind: 'sop',
-          label: issue.question,
-          reason: issue.reason,
-          text: issue.problematic_text,
-          issueIds: [issue.id],
-        });
       }
     }
 
@@ -1167,6 +1206,10 @@ export default function App() {
     const editorEl = handle.getEditorEl();
     if (!editorEl) return;
 
+    const texts = issue.problematic_text.split('|||').filter(Boolean);
+    const currentIdx = focusIndices[issue.id] ?? 0;
+    const targetText = texts.length > 1 ? texts[currentIdx % texts.length] : issue.problematic_text;
+
     // 1. Try to find the exact highlighted mark by data-issue-ids
     const marks = Array.from(editorEl.querySelectorAll('mark[data-issue-ids]'));
     let foundMark = marks.find((m) => {
@@ -1174,65 +1217,68 @@ export default function App() {
       return idsAttr.split(',').map(Number).includes(issue.id);
     }) as HTMLElement | null;
 
-    // 2. Fallback: find any mark whose text contains the problematic text
+    // 2. Fallback: find any mark whose text contains the target text
     if (!foundMark) {
       const allMarks = Array.from(editorEl.querySelectorAll('mark'));
       foundMark = allMarks.find((m) => {
         const text = m.textContent || '';
-        return text.includes(issue.problematic_text);
+        return text.includes(targetText);
       }) as HTMLElement | null;
     }
 
     if (foundMark) {
       foundMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      focusOnMark(foundMark, issue);
-      return;
-    }
-
-    // 3. Last fallback: search the article text and select the range
-    const text = getTextContent(handle.getHTML());
-    const m = findTextMatch(text, issue.problematic_text);
-    if (m) {
-      handle.focus();
-      const start = findTextNodeAndOffset(editorEl, m.start);
-      const end = findTextNodeAndOffset(editorEl, m.end);
-      if (start && end) {
-        const range = document.createRange();
-        range.setStart(start[0], start[1]);
-        range.setEnd(end[0], end[1]);
-        const selection = window.getSelection();
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-        const mark = range.startContainer.parentElement?.closest('mark');
-        if (mark) {
-          focusOnMark(mark, issue);
-          return;
+      focusOnMark(foundMark, issue, targetText);
+    } else {
+      // 3. Last fallback: search the article text
+      const text = getTextContent(handle.getHTML());
+      const m = findTextMatch(text, targetText);
+      if (m) {
+        handle.focus();
+        const start = findTextNodeAndOffset(editorEl, m.start);
+        const end = findTextNodeAndOffset(editorEl, m.end);
+        if (start && end) {
+          const range = document.createRange();
+          range.setStart(start[0], start[1]);
+          range.setEnd(end[0], end[1]);
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          const mark = range.startContainer.parentElement?.closest('mark');
+          if (mark) {
+            focusOnMark(mark, issue, targetText);
+          } else {
+            editorEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
         }
+      } else {
         editorEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
-    } else {
-      editorEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setFlashText(targetText);
+      setTimeout(() => setFlashText(''), 1200);
     }
 
-    setFlashText(issue.problematic_text);
-    setTimeout(() => setFlashText(''), 1200);
+    // Advance to next text in sequence for next click
+    if (texts.length > 1) {
+      setFocusIndices((prev) => ({ ...prev, [issue.id]: (currentIdx + 1) % texts.length }));
+    }
   };
 
-  const focusOnMark = (foundMark: HTMLElement, issue: CheckResult) => {
+  const focusOnMark = (foundMark: HTMLElement, issue: CheckResult, displayText?: string) => {
     hoverTargetRef.current = foundMark;
     const rect = foundMark.getBoundingClientRect();
-    const above = rect.top - 48 >= 0;
-    const pos = positionPopupFor(rect, 288, 250, above, 48);
+    const above = rect.top - 10 >= 0;
+    const pos = positionPopupFor(rect, 288, 250, above, 10);
     setHover({
       x: pos.x,
       y: pos.y,
       kind: 'sop',
       label: issue.question,
       reason: issue.reason,
-      text: issue.problematic_text,
+      text: displayText || issue.problematic_text,
       issue,
     });
-    setFlashText(issue.problematic_text);
+    setFlashText(displayText || issue.problematic_text);
     setTimeout(() => setFlashText(''), 1200);
     setTimeout(() => { hoverTargetRef.current = null; setHover(null); }, 15000);
   };
@@ -2006,10 +2052,15 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     setLiveReport(null);
     setAiResults(null);
     setAiError(null);
+    setAiDetectorResult(null);
+    setPlagiarismResult(null);
+    setHasChecked(false);
+    setIgnoredIds(new Set());
     localStorage.removeItem(DRAFT_KEY);
     if (editorRef.current) editorRef.current.setContent('');
     setShowResetModal(false);
   };
+
 
   const exportPdf = async () => {
     const container = document.createElement('div');
@@ -2190,7 +2241,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
   };
 
   return (
-    <div id="app-root" className="article-checker-app min-h-screen bg-surface-50 text-surface-900 font-sans antialiased overflow-hidden flex flex-col">
+    <div id="app-root" className="article-checker-app min-h-screen bg-surface-50 text-surface-900 font-sans antialiased flex flex-col">
       {/* Header */}
       <header id="app-header" className="article-checker-header h-[64px] bg-white/90 backdrop-blur-xl border-b border-surface-200 shadow-sm flex items-center justify-between px-6 shrink-0 sticky top-0 z-30 transition-all duration-300">
         <div id="header-brand" className="header-brand-group flex items-center gap-3 group cursor-default">
@@ -2256,11 +2307,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </div>
       </header>
 
-      <main id="app-main" className="app-main-content grid grid-cols-1 md:grid-cols-[7fr_3fr] md:grid-rows-[auto_1fr] gap-5 p-4 md:p-6" style={{ height: 'calc(130dvh - 64px)' }}>
+      <main id="app-main" className="app-main-content grid grid-cols-1 md:grid-cols-[7fr_3fr] gap-4 p-3 md:p-5">
         {/* Row 1 Col 1: Setup Artikel */}
-        <section id="setup-panel" className={`setup-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 min-h-0 panel overflow-hidden transition-all duration-300 hover:shadow-lg`}>
+        <section id="setup-panel" className={`setup-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 panel transition-all duration-300 hover:shadow-lg`}>
           <div className="accent-stripe shrink-0" />
-          <div id="meta-header" className="section-setup-meta px-5 py-5 border-b border-surface-100 bg-surface-50/50 space-y-4">
+          <div id="meta-header" className="section-setup-meta px-5 py-3 border-b border-surface-100 bg-surface-50/50 space-y-3">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-sm font-bold text-surface-900 font-display tracking-tight transition-colors duration-300 group-hover:text-brand-700">Setup Artikel</h2>
@@ -2385,9 +2436,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </section>
 
         {/* Row 1 Col 2: Skor Sampingan */}
-        <section id="score-panel" className={`score-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 min-h-0 panel overflow-hidden transition-all duration-300 hover:shadow-lg`}>
+        <section id="score-panel" className={`score-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 overflow-y-auto panel transition-all duration-300 hover:shadow-lg`}>
           <div className="accent-stripe shrink-0" />
-          <div className="p-5 flex flex-col h-full">
+          <div className="p-4 flex flex-col h-full">
             {/* Header */}
             <div className="score-header flex items-center justify-between mb-4">
               <div className="flex items-center gap-2 group cursor-default">
@@ -2427,20 +2478,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 </div>
               </div>
             ) : aiLoading ? (
-              /* Loading state - redesign */
-              <div className="score-loading-state flex items-start gap-5 mb-4 animate-fade-in">
-                <div className="relative w-24 h-24 shrink-0">
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <Loader className="w-8 h-8 text-brand-600 animate-spin" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 flex-1 min-w-0">
-                  {['SEO', 'Structure', 'Intent', 'Tone'].map((label, i) => (
-                    <div key={label} className="flex flex-col items-center justify-center p-2 bg-surface-50 rounded-xl border border-surface-100 animate-pulse" style={{ animationDelay: `${i * 150}ms` }}>
-                      <div className="w-6 h-5 bg-surface-200 rounded mb-1.5" />
-                      <span className="text-[9px] text-surface-400 font-medium uppercase tracking-wide">{label}</span>
-                    </div>
-                  ))}
+              /* Single centered loading animation */
+              <div className="flex items-center justify-center py-12 animate-fade-in">
+                <div className="flex flex-col items-center gap-4">
+                  <Loader className="w-10 h-10 text-brand-600 animate-spin" />
+                  <span className="text-xs font-semibold text-surface-400">Mengevaluasi artikel...</span>
                 </div>
               </div>
             ) : (
@@ -2493,7 +2535,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </section>
 
         {/* Row 2 Col 1: Article Editor */}
-        <section id="editor-area" className={`editor-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col h-full min-w-0 min-h-0 panel overflow-hidden relative transition-all duration-300 hover:shadow-lg`}>
+        <section id="editor-area" className={`editor-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 panel overflow-hidden relative transition-all duration-300 hover:shadow-lg`} style={{ minHeight: '680px', height: '680px' }}>
           <div className="accent-stripe shrink-0" />
           {/* Toolbar */}
           <div className="editor-toolbar px-4 md:px-6 py-2.5 flex flex-nowrap md:flex-wrap overflow-x-auto md:overflow-visible items-center gap-1 border-b border-surface-100 bg-white scrollbar-hide shadow-sm z-10 relative">
@@ -2612,7 +2654,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             id="editor-wrapper"
             ref={editorWrapperRef}
             data-editor-wrapper
-            className="editor-wrapper flex-1 relative overflow-auto min-h-0 px-4 md:px-10 py-6 md:py-8"
+            className="editor-wrapper flex-1 relative overflow-auto min-h-0 px-6 md:px-12 py-5 md:py-7"
             onClick={(e) => {
               const target = e.target as HTMLElement;
               if (target.tagName !== 'IMG' && !target.closest('mark') && !target.closest('.issue-popup')) {
@@ -2648,28 +2690,31 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               return (
               <div
                 id="issue-popup"
-                className="issue-popup fixed z-[100] w-72 bg-white/95 backdrop-blur-md border border-surface-200 shadow-xl shadow-surface-900/5 rounded-xl p-4 animate-fade-up"
+                ref={popupRef}
+                className="issue-popup fixed z-[100] w-72 bg-white/95 backdrop-blur-md border border-surface-200 shadow-xl shadow-surface-900/5 rounded-xl overflow-hidden"
                 style={{ left: `${hover.x}px`, top: `${hover.y}px`, transform: 'translateX(-50%)' }}
                 onMouseEnter={() => clearTimeout(hideTimeoutRef.current)}
                 onMouseLeave={scheduleHide}
               >
-                <div id="issue-popup-header" className="flex items-start gap-2 mb-2">
+                <div id="issue-popup-header" className="flex items-start gap-2 px-4 pt-4 pb-2 border-b border-surface-100 shrink-0">
                   {passed ? <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 shrink-0" /> : <AlertCircle className="w-4 h-4 text-brand-500 mt-0.5 shrink-0" />}
                   <h4 id="issue-popup-title" className="text-sm font-bold text-surface-900 leading-tight">{hover.label}</h4>
                 </div>
-                <p id="issue-popup-reason" className="text-xs text-surface-600 leading-relaxed mb-3">{hover.reason}</p>
+                <div id="issue-popup-body" className="overflow-y-auto px-4" style={{ maxHeight: '120px' }}>
+                  <p id="issue-popup-reason" className="text-xs text-surface-600 leading-relaxed py-3">{hover.reason}</p>
 
-                {!isSop && hover.text && (
-                  <div className="text-[10px] text-surface-500 bg-surface-50/50 border border-surface-200 rounded-lg px-2.5 py-1.5 mb-2 line-clamp-3 font-medium">"{hover.text}"</div>
-                )}
+                  {!isSop && hover.text && (
+                    <div className="text-[10px] text-surface-500 bg-surface-50/50 border border-surface-200 rounded-lg px-2.5 py-1.5 mb-3 line-clamp-3 font-medium">"{hover.text}"</div>
+                  )}
 
-                {isSop && !passed && (
-                  <div id="issue-popup-sop" className="bg-brand-50/50 rounded-lg p-2.5 text-[11px] text-surface-700 border border-brand-100">
-                    <div className="font-bold text-brand-800 mb-1 flex items-center gap-1"><Sparkles className="w-3 h-3"/> SOP</div>
-                    {issue ? SUGGESTED_LABELS[issue.id] || 'Periksa kembali bagian ini sesuai SOP.' : ''}
-                  </div>
-                )}
-                <div id="issue-popup-actions" className="mt-3 flex items-center justify-between">
+                  {isSop && !passed && (
+                    <div id="issue-popup-sop" className="bg-brand-50/50 rounded-lg p-2.5 text-[11px] text-surface-700 border border-brand-100 mb-3">
+                      <div className="font-bold text-brand-800 mb-1 flex items-center gap-1"><Sparkles className="w-3 h-3"/> SOP</div>
+                      {issue ? SUGGESTED_LABELS[issue.id] || 'Periksa kembali bagian ini sesuai SOP.' : ''}
+                    </div>
+                  )}
+                </div>
+                <div id="issue-popup-actions" className="flex items-center justify-between px-4 pb-4 pt-2 border-t border-surface-100 shrink-0">
                   {isSop && !passed && issue && issue.id === 56 ? (
                     <button
                       id="issue-popup-autocorrect-case"
@@ -2717,8 +2762,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         const next = new Set(ignoredIds);
                         if (next.has(issue.id)) next.delete(issue.id); else next.add(issue.id);
                         setIgnoredIds(next);
+                        ignoredIdsRef.current = next;
                         setHover(null);
-                        requestAnimationFrame(() => applyHighlights());
+                        setTimeout(() => applyHighlights(undefined, activeEvalTab), 50);
                       }}
                       className="text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-surface-100 text-surface-700 hover:bg-red-50 hover:text-red-600 transition-colors"
                     >
@@ -2937,9 +2983,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </section>
 
         {/* Row 2 Col 2: Evaluasi Artikel */}
-        <aside id="eval-panel" className={`eval-panel-section ${showMobileEval ? 'flex' : 'hidden'} md:flex flex-col h-full min-w-0 min-h-0 panel overflow-hidden transition-all duration-300 hover:shadow-lg`}>
+        <aside id="eval-panel" className={`eval-panel-section ${showMobileEval ? 'flex' : 'hidden'} md:flex flex-col min-w-0 panel overflow-hidden transition-all duration-300 hover:shadow-lg`} style={{ minHeight: '680px', height: '680px' }}>
           <div className="accent-stripe shrink-0" />
-          <div id="eval-header" className="p-5 border-b border-surface-100 bg-surface-50/30">
+          <div id="eval-header" className="px-5 py-3.5 border-b border-surface-100 bg-surface-50/30">
             <div className="flex items-center justify-between">
               <h2 id="eval-title" className="text-sm font-bold text-surface-900 font-display">Evaluasi Artikel</h2>
               <button
@@ -3059,6 +3105,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                             const next = new Set(ignoredIds);
                             if (next.has(target.id)) next.delete(target.id); else next.add(target.id);
                             setIgnoredIds(next);
+                            ignoredIdsRef.current = next;
                           }
                         };
                         const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
@@ -3078,7 +3125,14 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                 <I className={`w-4 h-4 shrink-0 ${co}`} />
                                 <div className="flex-1 min-w-0">
                                   <div className={`text-xs font-medium ${isPassed || isIgnored ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
-                                  {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">{itemForReason.reason}</div>}
+                                  {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">
+                                    {itemForReason.reason}
+                                    {itemForReason && itemForReason.problematic_text?.includes('|||') && (() => {
+                                      const texts = itemForReason.problematic_text.split('|||').filter(Boolean);
+                                      const idx = focusIndices[itemForReason.id] ?? 0;
+                                      return <span className="ml-2 text-[9px] font-medium text-gray-300">{idx + 1}/{texts.length}</span>;
+                                    })()}
+                                  </div>}
                                 </div>
                                 {isIgnored ? <CheckCircle2 className="w-3.5 h-3.5 text-gray-300 shrink-0" /> : isPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
                               </button>
@@ -3148,7 +3202,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         const toggleAiIgnore = (id: number) => {
                           const next = new Set(ignoredIds);
                           if (next.has(id)) next.delete(id); else next.add(id);
-                          setIgnoredIds(next);
+                        setIgnoredIds(next);
+                        ignoredIdsRef.current = next;
+                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
                         };
                         return (
                           <>
@@ -3797,6 +3853,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         }
         .issue-highlight-plagiarism:hover {
           background-color: rgba(251, 146, 60, 0.55);
+        }
+        .issue-highlight-ignored {
+          background-color: rgba(156, 163, 175, 0.35);
+          border-bottom: 2px solid rgba(107, 114, 128, 0.4);
+          border-radius: 2px;
+          cursor: pointer;
+          opacity: 0.6;
+        }
+        .issue-highlight-ignored:hover {
+          background-color: rgba(156, 163, 175, 0.5);
         }
         @media (max-width: 767px) {
           .editor-surface { font-size: 15px; line-height: 1.7; }

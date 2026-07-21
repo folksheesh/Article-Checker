@@ -1,7 +1,7 @@
 import type { RuleId } from './types';
 
 export const SOP_QUESTIONS: Record<RuleId, string> = {
-  1: 'Apakah judul jelas, tegas, padat, menarik, dan tidak terlalu umum?',
+  1: 'Apakah judul jelas, catchy, padat, dan tidak terlalu umum?',
   2: 'Apakah keyword utama sudah ada di judul?',
   3: 'Apakah kalimat pembuka (lead) terdiri atas 2 kalimat atau 12 kata?',
   4: 'Apakah intro (WHY) berhasil memaparkan urgensi masalah?',
@@ -17,7 +17,7 @@ export const SOP_QUESTIONS: Record<RuleId, string> = {
   14: 'Apakah meta title dan meta description sudah diisi dengan benar?',
   15: 'Apakah alt text pada gambar sudah dibuat secara deskriptif?',
   16: 'Apakah keyword utama memiliki densitas dan distribusi yang seimbang?',
-  17: 'Apakah panjang kalimat tetap ringan dan mudah dibaca (maksimal 25 kata)?',
+  17: 'Apakah panjang kalimat tetap ringan dan mudah dibaca (maksimal 30 kata)?',
   18: 'Apakah setiap heading memuat kata kunci atau indikator topik yang jelas?',
   19: 'Apakah artikel bebas dari kata lemah yang mengurangi kekuatan argumen?',
   20: 'Apakah panjang artikel sesuai target SOP (1000-1500 kata)?',
@@ -95,6 +95,12 @@ export const CTA_KEYWORDS = [
   'hubungi kami',
   'sekarang juga',
   'hari ini',
+  'pastikan',
+  'jangan ragu',
+  'lindungi',
+  'amankan',
+  'dapatkan',
+  'jangan tunda',
 ];
 
 export const WEAK_CTA_EXACT = [
@@ -157,7 +163,7 @@ export const STRONG_TITLE_WORDS = [
 
 export const MIN_KEYWORD_DENSITY = 0.5;
 export const MAX_KEYWORD_DENSITY = 2.5;
-export const MAX_SENTENCE_WORDS = 25;
+export const MAX_SENTENCE_WORDS = 30;
 export const MAX_PARAGRAPH_WORDS = 60;
 
 

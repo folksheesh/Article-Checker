@@ -2,9 +2,6 @@ import {
   CTA_KEYWORDS,
   FORBIDDEN_REGULATIONS,
   HOW_KEYWORDS,
-  LEAD_TARGET_SENTENCES,
-  LEAD_TARGET_WORDS,
-  LEAD_WORD_TOLERANCE,
   MAX_KEYWORD_DENSITY,
   MAX_META_DESC_CHARS,
   MAX_META_TITLE_CHARS,
@@ -99,13 +96,15 @@ function checkTitleClarity(parsed: ParsedArticle): CheckResult {
     );
   }
 
-  const hasNumber = /\d/.test(parsed.title);
   const hasStrongSignal = STRONG_TITLE_WORDS.some((w) => lower.includes(w));
-  if (!hasNumber && !hasStrongSignal) {
+  const hasHookPunctuation = /[?:-]/.test(parsed.title);
+  const wordCount = parsed.title.trim().split(/\s+/).filter(Boolean).length;
+  const looksSpecific = hasStrongSignal || hasHookPunctuation || wordCount >= 4;
+  if (!looksSpecific) {
     return result(
       1,
       'failed',
-      'Judul belum menunjukkan manfaat atau langkah spesifik. Tambahkan angka, kata "cara", "tips", "manfaat", "risiko", atau ajakan konkret agar pembaca tertarik.',
+      'Judul masih terlalu singkat atau terlalu umum. Tambahkan konteks yang lebih spesifik, manfaat, langkah, atau sudut pandang yang lebih kuat agar tetap catchy.',
       parsed.title,
     );
   }
@@ -113,30 +112,40 @@ function checkTitleClarity(parsed: ParsedArticle): CheckResult {
   return result(
     1,
     'passed',
-    `Judul padat, menarik, dan dalam batas ${MAX_TITLE_CHARS} karakter.`,
+    `Judul sudah jelas, spesifik, dan masih dalam batas ${MAX_TITLE_CHARS} karakter.`,
     '',
   );
 }
 
 function checkKeywordInTitle(parsed: ParsedArticle, keyword: string): CheckResult {
-  const kw = getPrimaryKeyword(keyword).toLowerCase();
-  if (!kw) {
+  const keywords = keyword.split(',').map((k) => k.trim().toLowerCase()).filter(Boolean);
+  if (keywords.length === 0) {
     return result(2, 'failed', 'Keyword utama belum diisi.', '');
   }
-  if (!parsed.title.toLowerCase().includes(kw)) {
-    return result(2, 'failed', `Keyword "${keyword}" tidak ditemukan di judul.`, parsed.title);
+  const titleLower = parsed.title.toLowerCase();
+  for (const kw of keywords) {
+    if (titleLower.includes(kw)) {
+      return result(2, 'passed', `Keyword "${kw}" ditemukan di judul.`, '');
+    }
   }
-  return result(2, 'passed', 'Keyword utama sudah ada di judul.', '');
+  for (const kw of keywords) {
+    const words = kw.split(/\s+/).filter((w) => w.length > 2);
+    if (words.length === 0) continue;
+    const matchCount = words.filter((w) => titleLower.includes(w)).length;
+    if (matchCount >= words.length / 2) {
+      return result(2, 'passed', `Sebagian kata kunci "${kw}" cocok dengan judul.`, '');
+    }
+  }
+  return result(2, 'info', `Keyword "${keyword}" tidak ditemukan di judul, namun masih diterima jika konteks sudah sesuai.`, parsed.title);
 }
 
 function checkLead(parsed: ParsedArticle): CheckResult {
   if (!parsed.lead.trim()) {
     return result(3, 'info', 'Kalimat pembuka (lead) belum ditemukan. Tambahkan 2 kalimat singkat yang langsung masuk ke inti masalah.', parsed.title);
   }
-  const wordsOk =
-    Math.abs(parsed.leadWordCount - LEAD_TARGET_WORDS) <= LEAD_WORD_TOLERANCE;
-  const sentencesOk = parsed.leadSentenceCount === LEAD_TARGET_SENTENCES;
-  if (wordsOk || sentencesOk) {
+  const wordsOk = parsed.leadWordCount >= 12 && parsed.leadWordCount <= 20;
+  const sentencesOk = parsed.leadSentenceCount >= 2 && parsed.leadSentenceCount <= 3;
+  if (wordsOk && sentencesOk) {
     return result(
       3,
       'passed',
@@ -147,7 +156,7 @@ function checkLead(parsed: ParsedArticle): CheckResult {
   return result(
     3,
     'failed',
-    `Lead harus 2 kalimat atau sekitar 12 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
+    `Lead maksimal 3 kalimat / 20 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
     parsed.lead,
   );
 }
@@ -287,32 +296,8 @@ function checkCta(parsed: ParsedArticle): CheckResult {
   return result(10, 'passed', 'CTA di akhir artikel sudah relevan dan persuasif.', '');
 }
 
-function checkTypos(parsed: ParsedArticle): CheckResult {
-  const issues: string[] = [];
-  if (/ {2,}/.test(parsed.raw)) {
-    issues.push('spasi ganda');
-  }
-  if (/,{2,}/.test(parsed.raw) || /\?{2,}/.test(parsed.raw) || /!{2,}/.test(parsed.raw)) {
-    issues.push('tanda baca berulang');
-  }
-  if (/(?<!\.)\.\.(?!\.)/.test(parsed.raw)) {
-    issues.push('titik ganda');
-  }
-
-  const badLine = parsed.lines.find(
-    (l) =>
-      / {2,}/.test(l) ||
-      /,{2,}|\?{2,}|!{2,}|(?<!\.)\.\.(?!\.)/.test(l),
-  );
-  if (issues.length > 0) {
-    return result(
-      11,
-      'failed',
-      `Ditemukan masalah format/teks: ${issues.join(', ')}. Periksa kembali spasi dan tanda baca.`,
-      badLine?.trim() ?? parsed.lines.find((l) => l.trim().length > 0) ?? '',
-    );
-  }
-  return result(11, 'passed', 'Tidak ada indikasi typo format ringan.', '');
+function checkTypos(_parsed: ParsedArticle): CheckResult {
+  return result(11, 'info', 'Deteksi typo ditangani oleh AI evaluation secara otomatis.', '');
 }
 
 function checkRegulation(parsed: ParsedArticle): CheckResult {
@@ -325,9 +310,9 @@ function checkRegulation(parsed: ParsedArticle): CheckResult {
   if (found.length === 0) {
     return result(
       12,
-      'info',
-      'Regulasi belum ditemukan. Regulasi bersifat opsional, tetapi direkomendasikan untuk memperkuat argumen jika relevan.',
-      parsed.lead || parsed.bodyParagraphs[0]?.text || parsed.title,
+      'passed',
+      'Tidak ada regulasi yang dirujuk. Regulasi bersifat opsional.',
+      '',
     );
   }
 
@@ -420,11 +405,12 @@ function checkSentenceLength(parsed: ParsedArticle): CheckResult {
 
   if (longSentences.length > 0) {
     const worst = longSentences.reduce((a, b) => (a.words >= b.words ? a : b));
+    const allTexts = longSentences.map((s) => s.text).join('|||');
     return result(
       17,
       'failed',
       `${longSentences.length} kalimat melebihi ${MAX_SENTENCE_WORDS} kata (terpanjang ${worst.words} kata). Pecah kalimat panjang agar lebih mudah dibaca.`,
-      worst.text,
+      allTexts,
     );
   }
   return result(

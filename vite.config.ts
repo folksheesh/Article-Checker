@@ -11,6 +11,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/ollama/, ''),
       },
+      '/ahrefs-api': {
+        target: 'https://api.ahrefs.com/v3',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/ahrefs-api/, ''),
+      },
     },
   },
 })
