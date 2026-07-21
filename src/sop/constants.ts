@@ -29,8 +29,8 @@ export const SOP_QUESTIONS: Record<RuleId, string> = {
   56: 'Apakah pemakaian huruf kapital dan kecil pada kata-kata sudah tepat (awal kalimat, nama/proper noun, dan akronim)?',
 };
 
-export const MAX_TITLE_CHARS = 60;
-export const MAX_META_TITLE_CHARS = 60;
+export const MAX_TITLE_CHARS = 70;
+export const MAX_META_TITLE_CHARS = 70;
 export const MAX_META_DESC_CHARS = 160;
 export const MAX_SENTENCES_PER_PARAGRAPH = 3;
 export const LEAD_TARGET_SENTENCES = 2;
@@ -160,40 +160,6 @@ export const MAX_KEYWORD_DENSITY = 2.5;
 export const MAX_SENTENCE_WORDS = 25;
 export const MAX_PARAGRAPH_WORDS = 60;
 
-export const WEAK_WORDS = [
-  'mungkin',
-  'sepertinya',
-  'agak',
-  'kurang lebih',
-  'dll',
-  'dan lain-lain',
-  'dahulu',
-  'saja',
-  'hanya',
-  'cuma',
-  'bisa jadi',
-  'kayaknya',
-  'seharusnya',
-  ' mestinya',
-];
-
-export const POWER_WORDS = [
-  'wajib',
-  'penting',
-  'hindari',
-  'lindungi',
-  'cegah',
-  'aman',
-  'risiko',
-  'kerugian',
-  'sanksi',
-  'denda',
-  'berlaku',
-  'mengikat',
-  'kuat',
-  'tegas',
-  'serius',
-];
 
 export const REGULATION_PATTERNS = [
   /\b(?:UU|Undang-Undang)\s*No\.?\s*\d{1,4}\s*(?:Tahun)?\s*\d{4}\b/gi,

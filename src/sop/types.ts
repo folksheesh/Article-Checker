@@ -1,8 +1,20 @@
 export type RuleId = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 51 | 52 | 53 | 54 | 55 | 56;
 
-export type CheckStatus = 'passed' | 'failed' | 'deferred';
+export type CheckStatus = 'passed' | 'failed' | 'deferred' | 'info';
 
 export type CheckSource = 'rule' | 'ai';
+
+export interface TargetHighlight {
+  exact_word: string | null;
+  sentence_context: string;
+  start_index: number | null;
+  end_index: number | null;
+}
+
+export interface UiAction {
+  has_ignore_button: boolean;
+  auto_correct_button: boolean;
+}
 
 export interface CheckResult {
   id: RuleId;
@@ -13,6 +25,14 @@ export interface CheckResult {
   problematic_text: string;
   source?: CheckSource;
   aiConfidence?: number;
+  ignored?: boolean;
+  category?: 'Error' | 'Information';
+  suggested_fix?: string;
+  target_highlight?: TargetHighlight;
+  point_penalty?: number;
+  has_ignore_button?: boolean;
+  auto_correct_button?: boolean;
+  ui_action?: UiAction;
 }
 
 export type ArticleStatusLabel = 'HIJAU' | 'KUNING' | 'MERAH';

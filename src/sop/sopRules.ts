@@ -15,7 +15,6 @@ import {
   MIN_INTERNAL_LINKS,
   MIN_KEYWORD_DENSITY,
   MIN_SUGGESTED_POSTS,
-  POWER_WORDS,
   REGULATION_PATTERNS,
   SOP_QUESTIONS,
   STRONG_TITLE_WORDS,
@@ -24,7 +23,6 @@ import {
   URGENCY_KEYWORDS,
   WEAK_CTA_EXACT,
   WEAK_TITLE_WORDS,
-  WEAK_WORDS,
   WHAT_KEYWORDS,
 } from './constants';
 import { parseArticle } from './parser';
@@ -41,7 +39,7 @@ function result(
     id,
     question: SOP_QUESTIONS[id],
     status,
-    passed: status === 'passed' || status === 'deferred',
+    passed: status === 'passed' || status === 'deferred' || status === 'info',
     reason,
     problematic_text,
   };
@@ -133,7 +131,7 @@ function checkKeywordInTitle(parsed: ParsedArticle, keyword: string): CheckResul
 
 function checkLead(parsed: ParsedArticle): CheckResult {
   if (!parsed.lead.trim()) {
-    return result(3, 'failed', 'Kalimat pembuka (lead) tidak ditemukan setelah judul. Tambahkan 2 kalimat singkat yang langsung masuk ke inti masalah.', parsed.title);
+    return result(3, 'info', 'Kalimat pembuka (lead) belum ditemukan. Tambahkan 2 kalimat singkat yang langsung masuk ke inti masalah.', parsed.title);
   }
   const wordsOk =
     Math.abs(parsed.leadWordCount - LEAD_TARGET_WORDS) <= LEAD_WORD_TOLERANCE;
@@ -158,7 +156,7 @@ function checkWhy(parsed: ParsedArticle): CheckResult {
   // Paragraph after lead = intro WHY
   const body = parsed.bodyParagraphs;
   if (body.length < 2) {
-    return result(4, 'failed', 'Paragraf pembuka (WHY) setelah lead belum ada. Jelaskan mengapa pembaca harus peduli pada masalah ini.', parsed.bodyParagraphs[0]?.text ?? parsed.lead ?? parsed.title);
+    return result(4, 'info', 'Paragraf pembuka (WHY) setelah lead belum ada. Jelaskan mengapa pembaca harus peduli pada masalah ini.', parsed.bodyParagraphs[0]?.text ?? parsed.lead ?? parsed.title);
   }
   const why = body[1];
   if (!containsUrgency(why.text)) {
@@ -175,7 +173,7 @@ function checkWhy(parsed: ParsedArticle): CheckResult {
 function checkHow(parsed: ParsedArticle): CheckResult {
   const h2 = parsed.headings.filter((h) => h.level === 2);
   if (h2.length === 0) {
-    return result(5, 'failed', 'Belum ada subjudul H2 untuk bagian prosedur (HOW). Tambahkan H2 seperti "Langkah-langkah..." atau "Cara Mengajukan...".', parsed.title);
+    return result(5, 'info', 'Belum ada subjudul H2 untuk bagian prosedur (HOW). Tambahkan H2 seperti "Langkah-langkah..." atau "Cara Mengajukan...".', parsed.title);
   }
   const hasHowSignal =
     containsAny(parsed.textContent, HOW_KEYWORDS) ||
@@ -199,7 +197,7 @@ function checkWhat(parsed: ParsedArticle): CheckResult {
   if (!hasData) {
     return result(
       6,
-      'failed',
+      'info',
       'Bagian pendukung (WHAT) belum memuat data, fakta, atau pandangan ahli. Tambahkan angka, persen, kutipan, atau dasar hukum.',
       parsed.bodyParagraphs[1]?.text ?? parsed.bodyParagraphs[0]?.text ?? parsed.lead ?? parsed.title,
     );
@@ -211,7 +209,7 @@ function checkHeadingHierarchy(parsed: ParsedArticle): CheckResult {
   const h2 = parsed.headings.filter((h) => h.level === 2);
   const h3 = parsed.headings.filter((h) => h.level === 3);
   if (h2.length === 0) {
-    return result(7, 'failed', 'Struktur heading belum rapi: minimal butuh 1 subjudul H2 untuk membagi artikel.', parsed.title);
+    return result(7, 'info', 'Struktur heading belum rapi: minimal butuh 1 subjudul H2 untuk membagi artikel.', parsed.title);
   }
   let seenH2 = false;
   for (const h of parsed.headings) {
@@ -266,14 +264,14 @@ function checkLanguage(parsed: ParsedArticle): CheckResult {
 function checkCta(parsed: ParsedArticle): CheckResult {
   const candidates = parsed.bodyParagraphs.slice(-2);
   if (candidates.length === 0) {
-    return result(10, 'failed', 'Tidak ada paragraf penutup untuk CTA.', '');
+    return result(10, 'info', 'Tidak ada paragraf penutup untuk CTA. Tambahkan ajakan bertindak yang relevan di akhir artikel.', '');
   }
   const ctaPara = [...candidates].reverse().find((p) => containsAny(p.text, CTA_KEYWORDS));
   if (!ctaPara) {
     return result(
       10,
-      'failed',
-      'CTA belum ditemukan di bagian akhir artikel.',
+      'info',
+      'CTA belum ditemukan di bagian akhir artikel. Tambahkan ajakan bertindak yang relevan dengan topik.',
       candidates[candidates.length - 1]?.text ?? '',
     );
   }
@@ -327,8 +325,8 @@ function checkRegulation(parsed: ParsedArticle): CheckResult {
   if (found.length === 0) {
     return result(
       12,
-      'failed',
-      'Belum ada dasar hukum seperti "UU No. 20 Tahun 2016" atau peraturan terkini. Tambahkan regulasi yang masih berlaku untuk memperkuat argumen.',
+      'info',
+      'Regulasi belum ditemukan. Regulasi bersifat opsional, tetapi direkomendasikan untuk memperkuat argumen jika relevan.',
       parsed.lead || parsed.bodyParagraphs[0]?.text || parsed.title,
     );
   }
@@ -440,7 +438,7 @@ function checkSentenceLength(parsed: ParsedArticle): CheckResult {
 function checkHeadingQuality(parsed: ParsedArticle, keyword: string): CheckResult {
   const h2 = parsed.headings.filter((h) => h.level === 2);
   if (h2.length === 0) {
-    return result(18, 'failed', 'Belum ada subheading H2. Tambahkan H2 untuk membagi topik.', '');
+    return result(18, 'info', 'Belum ada subheading H2. Tambahkan H2 untuk membagi topik.', '');
   }
 
   const kw = getPrimaryKeyword(keyword).toLowerCase();
@@ -470,39 +468,6 @@ function checkHeadingQuality(parsed: ParsedArticle, keyword: string): CheckResul
     18,
     'passed',
     `${h2.length} subheading H2 cukup deskriptif dan relevan dengan topik.`,
-    '',
-  );
-}
-
-function checkWeakWords(parsed: ParsedArticle): CheckResult {
-  const lower = parsed.textContent.toLowerCase();
-  const found = WEAK_WORDS.filter((w) => lower.includes(w));
-  const power = POWER_WORDS.filter((w) => lower.includes(w));
-
-  if (found.length > 0) {
-    const firstWeak = found[0];
-    const sentence = parsed.bodyParagraphs
-      .flatMap((p) => p.text.split(/[.!?]+/))
-      .find((s) => s.toLowerCase().includes(firstWeak));
-    return result(
-      19,
-      'failed',
-      `Ditemukan kata lemah yang membuat argumen terasa ragu-ragu: "${found.join(', ')}". Ganti dengan kata yang lebih tegas dan meyakinkan.`,
-      sentence?.trim() || firstWeak,
-    );
-  }
-  if (power.length < 2) {
-    return result(
-      19,
-      'failed',
-      'Artikel kurang memiliki kata kuat/persuasif. Tambahkan istilah seperti wajib, risiko, sanksi, atau lindungi untuk memperkuat pesan.',
-      parsed.bodyParagraphs[0]?.text || parsed.lead || parsed.title,
-    );
-  }
-  return result(
-    19,
-    'passed',
-    `Tidak ditemukan kata lemah dan terdapat ${power.length} kata kuat/persuasif.`,
     '',
   );
 }
@@ -557,7 +522,7 @@ function checkLinks(parsed: ParsedArticle): CheckResult {
         : contentLinks[0]?.raw ?? '';
     return result(
       13,
-      'failed',
+      'info',
       `Artikel butuh minimal ${MIN_INTERNAL_LINKS} link internal dan ${MIN_SUGGESTED_POSTS} artikel terkait. Saat ini: link internal=${contextualLinks}, artikel terkait≈${suggestedCount}.`,
       snippet || parsed.bodyParagraphs[parsed.bodyParagraphs.length - 1]?.text || parsed.title,
     );
@@ -572,7 +537,7 @@ function checkLinks(parsed: ParsedArticle): CheckResult {
 
 function checkMeta(metaTitle: string, metaDesc: string): CheckResult {
   if (!metaTitle.trim() || !metaDesc.trim()) {
-    return result(14, 'failed', 'Meta title dan/atau meta description masih kosong. Isi keduanya agar artikel siap tampil di hasil pencarian.', metaTitle || metaDesc || '');
+    return result(14, 'info', 'Meta title dan/atau meta description masih kosong. Isi keduanya agar artikel siap tampil di hasil pencarian.', metaTitle || metaDesc || '');
   }
   if (metaTitle.length > MAX_META_TITLE_CHARS) {
     return result(
@@ -611,7 +576,6 @@ export function runSopChecks(input: ArticleInput): SopReport {
     checkKeywordDensity(parsed, input.keyword),
     checkSentenceLength(parsed),
     checkHeadingQuality(parsed, input.keyword),
-    checkWeakWords(parsed),
     checkWordCount(parsed),
     checkLinks(parsed),
     checkMeta(input.metaTitle, input.metaDesc),

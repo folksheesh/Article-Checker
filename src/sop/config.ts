@@ -14,13 +14,13 @@ export const GEMINI_MODEL = import.meta.env?.VITE_GEMINI_MODEL ?? 'gemini-2.0-fl
 /** ===========================================================
  *  AI PROVIDER CONFIGURATION (OpenAI — fallback)
  *  =========================================================== */
-
+ 
 /** OpenAI API key. Used for AI evaluation, rewrite, chat, and keyword generation. */
-export const OPENAI_API_KEY = import.meta.env?.VITE_OPENAI_API_KEY ?? '';
+export const OPENAI_API_KEY = import.meta.env?.VITE_OPENAI_API_KEY ?? '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';
 
 /** OpenAI base URL. Default is official OpenAI endpoint. */
 export const OPENAI_BASE_URL = import.meta.env?.VITE_OPENAI_BASE_URL ?? 'https://api.openai.com/v1';
-
+ 
 /** Default model for OpenAI. */
 export const OPENAI_MODEL = import.meta.env?.VITE_OPENAI_MODEL ?? 'gpt-4o-mini';
 
@@ -66,11 +66,14 @@ export const GPTZERO_API_KEY = import.meta.env?.VITE_GPTZERO_API_KEY ?? '';
 /** GPTZero base URL. */
 export const GPTZERO_BASE_URL = import.meta.env?.VITE_GPTZERO_BASE_URL ?? 'https://api.gptzero.me/v1';
 
-/** Hugging Face access token. For chatgpt-detector-roberta model (free). */
-export const HUGGINGFACE_API_KEY = import.meta.env?.VITE_HUGGINGFACE_API_KEY ?? '';
+/** Hugging Face access token. Used for DeepSeek via Hugging Face Router and detector inference. */
+export const HUGGINGFACE_API_KEY = import.meta.env?.VITE_HUGGINGFACE_API_KEY ?? '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';
 
-/** Hugging Face inference endpoint for AI detection. */
-export const HUGGINGFACE_MODEL = import.meta.env?.VITE_HUGGINGFACE_MODEL ?? 'chatgpt-detector-roberta';
+/** Hugging Face base URL for OpenAI-compatible chat completions. */
+export const HUGGINGFACE_BASE_URL = import.meta.env?.VITE_HUGGINGFACE_BASE_URL ?? 'https://router.huggingface.co/v1';
+
+/** Hugging Face inference model. Defaulted to DeepSeek via router. */
+export const HUGGINGFACE_MODEL = import.meta.env?.VITE_HUGGINGFACE_MODEL ?? 'deepseek-ai/DeepSeek-V4-Flash:novita';
 
 /** ===========================================================
  *  PLAGIARISM CHECKER APIs

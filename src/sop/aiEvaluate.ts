@@ -39,35 +39,48 @@ function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
 
 export async function evaluateWithAI(input: AiEvaluationInput, apiKey = '', signal?: AbortSignal): Promise<AiEvaluationOutput> {
   const systemPrompt = `Anda adalah Editor Senior dan Ahli Hukum Konten Digital Indonesia.
-Tugas Anda mengevaluasi artikel hukum berdasarkan 5 kriteria kualitas berikut. Keluarkan hasil HANYA dalam format JSON.
+Tugas Anda mengevaluasi artikel hukum berdasarkan SOP dan aturan berikut. Keluarkan hasil HANYA dalam format JSON.
 
-Kriteria:
-1. Nada bahasa profesional dan sesuai konteks legal (tidak terlalu kasual, tidak terlalu akademik, terpercaya untuk klien).
-2. Alur antar paragraf koheren dan mudah diikuti (ada transisi logis, tidak melompat-lompat).
-3. Klaim hukum akurat dan tidak menyesatkan (tidak membuat klaim absolut jika tidak pasti, tidak mengada-ada).
-4. CTA persuasif dan relevan dengan topik (bukan hanya "hubungi kami" kering).
+ATURAN EVALUASI:
+1. Nada bahasa profesional dan sesuai konteks legal.
+2. Alur antar paragraf koheren dan mudah diikuti.
+3. Klaim hukum akurat dan tidak menyesatkan.
+4. CTA persuasif dan relevan dengan topik.
 5. Pembukaan dan penutup kuat serta memberikan kesan profesional.
-6. Pemakaian huruf kapital dan kecil pada kata-kata sudah benar (kata di awal kalimat menggunakan huruf kapital, nama badan hukum / merek / proper noun ditulis dengan kapitalisasi yang benar, akronim seperti "PT", "UU", "Pasal" ditulis dengan tepat, tidak ada kata ALL CAPS di tengah kalimat biasa, dan kata sapaan "Anda" selalu diawali huruf kapital).
+6. Pemakaian huruf kapital sudah benar (awal kalimat, proper noun, akronim, "Anda").
 
-Setiap kriteria dinilai dengan skor 0-100 dan diberikan alasan singkat (max 150 karakter) serta kutipan teks yang bermasalah jika ada.
+WEAK WORDS CHECK:
+- Cari kata lemah: "mungkin", "saja", "hanya"
+- Jika ditemukan, buat item evaluasi dengan kategori "Error"
 
-Selain itu, berikan sub-skor (0-100) untuk 4 aspek berikut:
-- seo: Kekuatan SEO artikel (keyword density, meta title/desc, heading structure, link)
-- structure: Struktur artikel (heading hierarchy, paragraf, panjang, koherensi)
-- intent: Kesesuaian dengan search intent (apakah menjawab kebutuhan pencari)
-- tone: Kualitas nada bahasa (profesional, kredibel, mudah dipahami)
+LEGISLATIVE VALIDATION:
+- Referensi UU bersifat OPSIONAL. JANGAN flag ketiadaan UU sebagai error.
+- Jika ada referensi UU yang tidak relevan dengan topik artikel, beri saran informasi.
+- Jika tidak ada UU, jangan buat item evaluasi untuk ini.
 
-Dan berikan rekomendasi "bestNextMove" — satu langkah prioritas tertinggi yang paling berdampak untuk memperbaiki artikel (max 100 karakter).
+CLASSIFICATION:
+- Error: masalah yang bisa di-highlight ke kata spesifik di artikel (weak words, kapitalisasi salah, dll)
+- Information: masalah konseptual/missing (CTA tidak ada, UU tidak relevan) — beri auto_correct_button: true
 
-Skema JSON:
+Skema JSON output:
 {
   "results": [
     {
       "id": 51,
-      "passed": true,
-      "score": 85,
-      "reason": "Alasan singkat lulus/gagal.",
-      "problematic_text": "Kutipan teks yang bermasalah atau kosong jika lulus."
+      "passed": false,
+      "score": 70,
+      "reason": "Alasan singkat (max 150 karakter).",
+      "category": "Error",
+      "suggested_fix": "Saran perbaikan singkat.",
+      "target_highlight": {
+        "exact_word": "mungkin",
+        "sentence_context": "Kalimat lengkap yang mengandung masalah.",
+        "start_index": 5,
+        "end_index": 12
+      },
+      "point_penalty": 10,
+      "has_ignore_button": true,
+      "auto_correct_button": false
     }
   ],
   "subScores": {
@@ -77,7 +90,12 @@ Skema JSON:
     "tone": 85
   },
   "bestNextMove": "Tambahkan CTA yang relevan di akhir artikel."
-}`;
+}
+
+PENTING:
+- target_highlight.start_index dan end_index adalah posisi karakter di teks artikel (bukan kalimat).
+- Untuk item Information, set target_highlight ke null dan auto_correct_button: true.
+- point_penalty: 10 untuk Error, 0 untuk Information.`;
 
   const cleanArticle = stripImages(input.article || '');
 
@@ -113,15 +131,27 @@ ${truncatedArticle}`;
       const id = Number(r.id) as 51 | 52 | 53 | 54 | 55 | 56;
       const passed = Boolean(r.passed);
       const score = Number(r.score) || 0;
+      const cat = r.category || (passed ? 'passed' : 'Error');
       return {
         id,
         question: SOP_QUESTIONS[id],
-        status: passed ? 'passed' : ('failed' as CheckResult['status']),
+        status: passed ? 'passed' : (cat === 'Information' ? 'info' : 'failed'),
         passed,
         reason: r.reason || '-',
-        problematic_text: r.problematic_text || '',
+        problematic_text: r.target_highlight?.exact_word || '',
         source: 'ai' as const,
         aiConfidence: score,
+        category: cat === 'Information' ? 'Information' : cat === 'Error' ? 'Error' : undefined,
+        suggested_fix: r.suggested_fix || '',
+        target_highlight: r.target_highlight ? {
+          exact_word: r.target_highlight.exact_word || null,
+          sentence_context: r.target_highlight.sentence_context || '',
+          start_index: r.target_highlight.start_index != null ? Number(r.target_highlight.start_index) : null,
+          end_index: r.target_highlight.end_index != null ? Number(r.target_highlight.end_index) : null,
+        } : undefined,
+        point_penalty: r.point_penalty != null ? Number(r.point_penalty) : (cat === 'Information' ? 0 : 10),
+        has_ignore_button: r.has_ignore_button !== false,
+        auto_correct_button: Boolean(r.auto_correct_button),
       };
     });
 

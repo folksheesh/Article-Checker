@@ -13,3 +13,7 @@ export type { PlagiarismResult } from './apis/plagiarism';
 export { checkPlagiarism } from './apis/plagiarism';
 export { callChatCompletion } from './apis/openai';
 export type { ChatCompletionResult } from './apis/openai';
+export { HighlightMark, TipTapEditor } from './extensions';
+export type { ActiveStyleState, TipTapEditorHandle, ToolbarAction } from './extensions';
+export type { EvaluationAccuracy } from './accuracy';
+export { computeEvaluationAccuracy, computeSopAccuracy, computeAIDetectorAccuracy, computePlagiarismAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './accuracy';

@@ -1,7 +1,7 @@
 import type { CheckResult, SopReport, StatusConfig } from './types';
 
 export function calculateSopScore(results: CheckResult[], wordCount: number): SopReport {
-  const scored = results.filter((r) => r.status !== 'deferred');
+  const scored = results.filter((r) => r.status !== 'deferred' && !r.ignored);
   const failedCount = scored.filter((r) => r.status === 'failed').length;
   const passedCount = scored.filter((r) => r.status === 'passed').length;
   const scoredTotal = scored.length;
