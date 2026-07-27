@@ -1,4 +1,5 @@
 {
+  "outputDirectory": "dist",
   "rewrites": [
     { "source": "/ollama", "destination": "/api/ollama" },
     { "source": "/ollama/(.*)", "destination": "/api/ollama?apiPath=/$1" }
