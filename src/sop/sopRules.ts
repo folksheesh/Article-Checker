@@ -143,21 +143,20 @@ function checkLead(parsed: ParsedArticle): CheckResult {
   if (!parsed.lead.trim()) {
     return result(3, 'info', 'Kalimat pembuka (lead) belum ditemukan. Tambahkan 2 kalimat singkat yang langsung masuk ke inti masalah.', parsed.title);
   }
-  const wordsOk = parsed.leadWordCount >= 12 && parsed.leadWordCount <= 20;
-  const sentencesOk = parsed.leadSentenceCount >= 2 && parsed.leadSentenceCount <= 3;
-  if (wordsOk && sentencesOk) {
+  const tooLong = parsed.leadSentenceCount > 3 && parsed.leadWordCount > 20;
+  if (tooLong) {
     return result(
       3,
-      'passed',
-      `Lead memenuhi kriteria (${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata).`,
-      '',
+      'failed',
+      `Lead maksimal 3 kalimat / 20 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
+      parsed.lead,
     );
   }
   return result(
     3,
-    'failed',
-    `Lead maksimal 3 kalimat / 20 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
-    parsed.lead,
+    'passed',
+    `Lead dalam batas wajar (${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata).`,
+    '',
   );
 }
 
@@ -240,7 +239,7 @@ function checkHeadingHierarchy(parsed: ParsedArticle): CheckResult {
 
 function checkParagraphLength(parsed: ParsedArticle): CheckResult {
   const offenders = parsed.bodyParagraphs.filter(
-    (p) => p.sentenceCount > MAX_SENTENCES_PER_PARAGRAPH || p.wordCount > MAX_PARAGRAPH_WORDS,
+    (p) => p.sentenceCount > MAX_SENTENCES_PER_PARAGRAPH && p.wordCount > MAX_PARAGRAPH_WORDS,
   );
   if (offenders.length > 0) {
     const worst = offenders.reduce((a, b) => {

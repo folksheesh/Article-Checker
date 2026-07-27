@@ -25,7 +25,6 @@ import {
   XCircle,
   X,
   AlertCircle,
-
   Sparkles,
   BrainCircuit,
   Target,
@@ -45,13 +44,20 @@ import {
   ScanLine,
   Globe,
   Send,
+  Search,
+  Layers,
+  Crosshair,
+  Volume2,
 } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import * as docx from 'docx';
-import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
+import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, evaluateChangedParagraphs, buildInitialState, mergeIncrementalResults, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, type IncrementalState, type ParagraphBlock, type RecheckCacheEntry, type IncrementalRecheckResult, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
 import { callArticleChat } from './sop/articleChat';
 import { OPENAI_API_KEY, AHREFS_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
 import { stripImages } from './sop/images';
+import { AiErrorProvider, AiErrorFallback, useAiError } from './sop/AiErrorContext';
+import { classifyAiError, logAiError } from './sop/errorHandling';
+import type { AiFeature, AiErrorInfo } from './sop/errorHandling';
 
 type HighlightMode = 'sop' | 'ai-detector' | 'plagiarism';
 type HoverKind = 'sop' | 'ai-detector' | 'plagiarism';
@@ -105,6 +111,11 @@ function markdownToHtml(md: string): string {
     markTags.push(m);
     return `%%%MARK${markTags.length - 1}%%%`;
   });
+
+  // Convert raw HTML <a> tags to markdown link syntax BEFORE HTML escaping.
+  // This handles cases where AI responses or pasted content contain raw HTML
+  // instead of markdown links — prevents &lt;a&gt; from showing as raw text.
+  html = html.replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
 
   // Escape HTML special chars in text first, then selectively restore formatting
   html = html
@@ -305,6 +316,19 @@ function findTextMatch(text: string, query: string): { start: number; end: numbe
   return null;
 }
 
+function extractActualCorrection(suggestedFix: string): string {
+  // Try to extract the actual word from AI response like "Ubah 'X' menjadi 'Y'."
+  const menjadiMatch = suggestedFix.match(/menjadi\s+'([^']+)'/i);
+  if (menjadiMatch) return menjadiMatch[1];
+  const menjadiMatch2 = suggestedFix.match(/menjadi\s+"([^"]+)"/i);
+  if (menjadiMatch2) return menjadiMatch2[1];
+  const toMatch = suggestedFix.match(/(?:to|into|with)\s+'([^']+)'/i);
+  if (toMatch) return toMatch[1];
+  const toMatch2 = suggestedFix.match(/(?:to|into|with)\s+"([^"]+)"/i);
+  if (toMatch2) return toMatch2[1];
+  return suggestedFix;
+}
+
 function findTextMatchAfter(text: string, query: string, from: number): { start: number; end: number } | null {
   const startAt = Math.max(0, from);
   const sliced = text.slice(startAt);
@@ -405,7 +429,7 @@ function findTextNodeAndOffset(container: HTMLElement, globalOffset: number): [N
   return null;
 }
 
-export default function App() {
+function AppContent() {
   const [article, setArticle] = useState('');
   const [htmlContent, setHtmlContent] = useState('');
   const [keyword, setKeyword] = useState('');
@@ -416,13 +440,14 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [aiResults, setAiResults] = useState<AiEvaluationOutput | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState<string | null>(null);
+  const { setError, clearError, clearAll, errors: aiFeatureErrors } = useAiError();
   const [hover, setHover] = useState<HoverData | null>(null);
   const [fixingId, setFixingId] = useState<number | null>(null);
   const [flashText, setFlashText] = useState('');
   const [showKwPopup, setShowKwPopup] = useState(false);
   const [kwGenLoading, setKwGenLoading] = useState(false);
   const [kwGenError, setKwGenError] = useState('');
+
   const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set());
   const [kwInput] = useState('');
   const [fileImportLoading, setFileImportLoading] = useState(false);
@@ -430,6 +455,7 @@ export default function App() {
   const [showExportModal, setShowExportModal] = useState(false);
   const [showPassedIssues, setShowPassedIssues] = useState(false);
   const [showMobileEval, setShowMobileEval] = useState(false);
+  const [animatedScore, setAnimatedScore] = useState(0);
   const selectedImgRef = useRef<HTMLImageElement | null>(null);
   const [selectedImgInfo, setSelectedImgInfo] = useState<{ width: number; align: string; x: number; y: number; maxWidth: number } | null>(null);
   const hoverTargetRef = useRef<HTMLElement | null>(null);
@@ -447,6 +473,7 @@ export default function App() {
   const [plagiarismResult, setPlagiarismResult] = useState<PlagiarismResult | null>(null);
   const [plagiarismLoading, setPlagiarismLoading] = useState(false);
   const [plagiarismFixLoading, setPlagiarismFixLoading] = useState(false);
+  const [metaDescLoading, setMetaDescLoading] = useState(false);
   const [ahrefsMetrics, setAhrefsMetrics] = useState<AhrefsKeywordMetric[]>([]);
   const [activeStyles, setActiveStyles] = useState<ActiveStyleState | null>(null);
   const [evaluationAccuracy, setEvaluationAccuracy] = useState<EvaluationAccuracy | null>(null);
@@ -455,6 +482,12 @@ export default function App() {
   const [hasChecked, setHasChecked] = useState(false);
   const [focusIndices, setFocusIndices] = useState<Record<number, number>>({});
   const highlightsBlockedRef = useRef(true);
+
+  const [incrementalResults, setIncrementalResults] = useState<CheckResult[]>([]);
+  const incrementalStateRef = useRef<IncrementalState>(buildInitialState());
+  const incrementalAbortRef = useRef<AbortController | null>(null);
+  const incrementalDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const INCREMENTAL_DEBOUNCE_MS = 1500;
 
   useEffect(() => { ignoredIdsRef.current = ignoredIds; }, [ignoredIds]);
 
@@ -470,9 +503,11 @@ export default function App() {
   const popupRef = useRef<HTMLDivElement>(null);
   const saveDraftTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const analysisAbortRef = useRef<AbortController | null>(null);
+  const recheckCacheRef = useRef<RecheckCacheEntry | null>(null);
   const isUpdatingFromCodeRef = useRef(false);
   const undoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
   const redoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
+  const checkingRef = useRef(false);
   const lastUndoRef = useRef(0);
 
   const pushUndo = () => {
@@ -613,6 +648,79 @@ export default function App() {
     }
     const next = runSopChecks({ article, keyword, metaTitle, metaDesc });
     setLiveReport(next);
+  }, [article, keyword, metaTitle, metaDesc]);
+
+  // Debounced incremental AI checking — only evaluates changed paragraphs
+  useEffect(() => {
+    if (!article.trim()) {
+      setIncrementalResults([]);
+      incrementalStateRef.current = buildInitialState();
+      return;
+    }
+
+    clearTimeout(incrementalDebounceRef.current);
+    incrementalDebounceRef.current = setTimeout(async () => {
+      incrementalAbortRef.current?.abort();
+      incrementalAbortRef.current = new AbortController();
+      const signal = incrementalAbortRef.current.signal;
+
+      const prevBlocks = incrementalStateRef.current.paragraphs;
+      const newBlocks = splitIntoParagraphs(article);
+      incrementalStateRef.current.paragraphs = newBlocks;
+
+      const { changedBlocks, unchangedBlocks } = detectChangedParagraphs(prevBlocks, newBlocks);
+
+      if (changedBlocks.length === 0 && incrementalStateRef.current.lastArticle === article) return;
+
+      incrementalStateRef.current.lastArticle = article;
+
+      const contexts = changedBlocks.map((b) => getParagraphContext(newBlocks, b.index));
+      const newResults = await evaluateChangedParagraphs(
+        { article, keyword, metaTitle, metaDesc },
+        changedBlocks,
+        contexts,
+        OPENAI_API_KEY,
+        signal,
+      );
+
+      if (signal.aborted) return;
+
+      const cache = incrementalStateRef.current.cache;
+      for (const block of unchangedBlocks) {
+        const key = `${block.hash}_${keyword}`;
+        if (!cache.has(key)) {
+          cache.set(key, { results: [], timestamp: Date.now() });
+        }
+      }
+      for (const block of changedBlocks) {
+        const key = `${block.hash}_${keyword}`;
+        cache.set(key, { results: newResults.filter((r) => r.id >= 1000 + block.index * 10 && r.id < 1000 + (block.index + 1) * 10), timestamp: Date.now() });
+      }
+
+      const cachedResults: CheckResult[] = [];
+      for (const block of newBlocks) {
+        const key = `${block.hash}_${keyword}`;
+        const entry = cache.get(key);
+        if (entry) cachedResults.push(...entry.results);
+      }
+
+      const mergedResults = mergeIncrementalResults(cachedResults, newResults);
+      setIncrementalResults(mergedResults);
+
+      setAiResults((prev) => {
+        if (prev && prev.results.some((r) => r.id >= 51 && r.id <= 56)) return prev;
+        const existingIds = new Set(prev?.results.map((r) => r.id) || []);
+        const newItems = mergedResults.filter((r) => !existingIds.has(r.id));
+        if (newItems.length === 0) return prev;
+        return {
+          results: [...(prev?.results || []), ...newItems],
+          subScores: prev?.subScores || { seo: 0, structure: 0, intent: 0, tone: 0 },
+          bestNextMove: prev?.bestNextMove || '',
+        };
+      });
+    }, INCREMENTAL_DEBOUNCE_MS);
+
+    return () => clearTimeout(incrementalDebounceRef.current);
   }, [article, keyword, metaTitle, metaDesc]);
 
   useEffect(() => {
@@ -761,6 +869,23 @@ export default function App() {
   }, [activeReport, ignoredIds, wordCount]);
 
   const statusConfig = useMemo(() => (activeReport ? getStatusConfig(activeReport) : null), [activeReport]);
+
+  // Count-up animation for score
+  useEffect(() => {
+    if (score === 0) { setAnimatedScore(0); return; }
+    const duration = 800;
+    const start = performance.now();
+    const from = animatedScore;
+    const raf = requestAnimationFrame(function tick(now) {
+      const elapsed = now - start;
+      const progress = Math.min(elapsed / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setAnimatedScore(Math.round(from + (score - from) * eased));
+      if (progress < 1) requestAnimationFrame(tick);
+    });
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [score]);
 
   const syncFromEditor = () => {
     const editor = editorRef.current;
@@ -1070,7 +1195,7 @@ export default function App() {
             kind: 'sop',
             label: issue.question,
             reason: issue.reason,
-            text: issue.problematic_text,
+            text: pt,
             issueIds: [issue.id],
           });
         }
@@ -1145,59 +1270,126 @@ export default function App() {
       }
     }
 
-    ranges.sort((a, b) => a.start - b.start);
+    // Build highlight decorations from the ProseMirror document.
+    // This avoids the destructive htmlToMarkdown → markdownToHtml round-trip
+    // that previously corrupted links, bold, and spacing on every "Periksa" click.
+    const doc = handle.getDoc();
+    const foundPositions: {
+      from: number;
+      to: number;
+      cls: string;
+      issueIds?: number[];
+      text: string;
+      reason: string;
+      label: string;
+      kind: string;
+      score?: number;
+    }[] = [];
 
-    // Merge overlapping ranges to avoid collisions
-    const merged: HighlightRange[] = [];
+    // Pre-build flat text segments from ProseMirror doc for cross-node regex matching.
+    // Inline formatting (bold, italic, links) splits text into multiple ProseMirror text
+    // nodes, so searching one node at a time misses matches that span node boundaries.
+    const segments: { startPos: number; textLen: number }[] = [];
+    const parts: string[] = [];
+    if (doc) {
+      doc.descendants((node: any, pos: number) => {
+        if (node.isText) {
+          const t = node.text || '';
+          segments.push({ startPos: pos, textLen: t.length });
+          parts.push(t);
+        }
+      });
+    }
+    const fullDocText = parts.join('');
+
+    const fuzzyRe = (s: string) =>
+      new RegExp(
+        s.replace(/\s+/g, ' ').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'),
+        'i',
+      );
+
+    // Find the first regex match in fullDocText and map it to ProseMirror positions.
+    // Handles matches that span multiple text segments.
+    const findMatch = (re: RegExp): { from: number; to: number } | null => {
+      const m = re.exec(fullDocText);
+      if (!m) return null;
+      const matchStart = m.index;
+      const matchEnd = m.index + m[0].length;
+      let from: number | null = null;
+      let to: number | null = null;
+      let accumulated = 0;
+      for (const seg of segments) {
+        const segEnd = accumulated + seg.textLen;
+        if (from === null && matchStart < segEnd) {
+          from = seg.startPos + (matchStart - accumulated);
+        }
+        if (from !== null && matchEnd <= segEnd) {
+          to = seg.startPos + (matchEnd - accumulated);
+          break;
+        }
+        accumulated = segEnd;
+      }
+      return from !== null && to !== null ? { from, to } : null;
+    };
+
     for (const range of ranges) {
+      const text = range.text.trim();
+      if (!text) continue;
+
+      const re = fuzzyRe(text);
+      let found = findMatch(re);
+      if (!found) {
+        // Fallback: strip trailing punctuation (same as findTextMatch)
+        const clean = text.replace(/[.!?,;:]+$/g, '');
+        if (clean.length > 10) {
+          const re2 = fuzzyRe(clean);
+          found = findMatch(re2);
+        }
+      }
+
+      if (!found) continue;
+
+      foundPositions.push({
+        from: found.from,
+        to: found.to,
+        cls: range.cls,
+        issueIds: range.issueIds,
+        text: range.text,
+        reason: range.reason,
+        label: range.label,
+        kind: range.kind,
+        score: range.score,
+      });
+    }
+
+    // Sort and merge overlapping decorations
+    foundPositions.sort((a, b) => a.from - b.from);
+    const merged: typeof foundPositions = [];
+    for (const fp of foundPositions) {
       const prev = merged[merged.length - 1];
-      if (prev && range.start <= prev.end) {
-        prev.end = Math.max(prev.end, range.end);
-        if (range.issueIds) prev.issueIds = [...new Set([...(prev.issueIds || []), ...range.issueIds])];
-        if (range.text.length > prev.text.length) prev.text = range.text;
-        if (!prev.reason.includes(range.reason)) prev.reason += ' | ' + range.reason;
-        prev.label = prev.label || range.label;
+      if (prev && fp.from < prev.to) {
+        prev.to = Math.max(prev.to, fp.to);
+        if (fp.issueIds) {
+          prev.issueIds = [...new Set([...(prev.issueIds || []), ...fp.issueIds])];
+        }
       } else {
-        merged.push({ ...range });
+        merged.push(fp);
       }
     }
 
-    let result = '';
-    let lastEnd = 0;
-    for (const range of merged) {
-      if (range.start < lastEnd) continue;
-      result += highlightedMd.slice(lastEnd, range.start);
-      const safeReason = range.reason.replace(/"/g, '&quot;');
-      const safeLabel = range.label.replace(/"/g, '&quot;');
-      const safeText = range.text.replace(/"/g, '&quot;');
-      const safeIssueId = range.issueIds && range.issueIds.length > 0 ? ` data-issue-id="${range.issueIds[0]}"` : '';
-      const safeScore = typeof range.score === 'number' ? ` data-score="${range.score}"` : '';
-      result += `<mark class="${range.cls}" data-kind="${range.kind}"${safeIssueId}${safeScore} data-text="${safeText}" data-reason="${safeReason}" data-label="${safeLabel}">${highlightedMd.slice(
-        range.start,
-        range.end,
-      )}</mark>`;
-      lastEnd = range.end;
-    }
-    result += highlightedMd.slice(lastEnd);
-
-    const newHtml = markdownToHtml(result);
-    setHtmlContent(newHtml);
-    isUpdatingFromCodeRef.current = true;
-    handle.setContent(newHtml);
-
-    // Restore selection after setContent
-    requestAnimationFrame(() => {
-      const restore = findTextNodeAndOffset(editorEl, offsetBefore);
-      if (restore && selection) {
-        const [node, offset] = restore;
-        const range = document.createRange();
-        range.setStart(node, offset);
-        range.setEnd(node, offset);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      }
-      isUpdatingFromCodeRef.current = false;
+    const decos = merged.map((fp) => {
+      const attrs: Record<string, string> = {
+        'data-kind': fp.kind,
+        'data-text': fp.text.replace(/"/g, '&quot;'),
+        'data-reason': fp.reason.replace(/"/g, '&quot;'),
+        'data-label': fp.label.replace(/"/g, '&quot;'),
+      };
+      if (fp.issueIds?.length) attrs['data-issue-ids'] = fp.issueIds.join(',');
+      if (typeof fp.score === 'number') attrs['data-score'] = String(fp.score);
+      return { from: fp.from, to: fp.to, cls: fp.cls, attrs };
     });
+
+    handle.setDecorations(decos);
   };
 
   const focusIssue = (issue: CheckResult | null) => {
@@ -1210,12 +1402,20 @@ export default function App() {
     const currentIdx = focusIndices[issue.id] ?? 0;
     const targetText = texts.length > 1 ? texts[currentIdx % texts.length] : issue.problematic_text;
 
-    // 1. Try to find the exact highlighted mark by data-issue-ids
-    const marks = Array.from(editorEl.querySelectorAll('mark[data-issue-ids]'));
-    let foundMark = marks.find((m) => {
-      const idsAttr = m.getAttribute('data-issue-ids') || '';
+    // 1. Try to find the exact highlighted mark by data-issue-ids (plural) or data-issue-id (singular)
+    const allMarksWithIds = Array.from(
+      editorEl.querySelectorAll('mark[data-issue-ids], mark[data-issue-id]'),
+    );
+    const matchingMarks = allMarksWithIds.filter((m) => {
+      const idsAttr = m.getAttribute('data-issue-ids') || m.getAttribute('data-issue-id') || '';
       return idsAttr.split(',').map(Number).includes(issue.id);
-    }) as HTMLElement | null;
+    }) as HTMLElement[];
+    // Cycle through multiple marks using focusIndices
+    let foundMark: HTMLElement | null = null;
+    if (matchingMarks.length > 0) {
+      const idx = focusIndices[issue.id] ?? 0;
+      foundMark = matchingMarks[idx % matchingMarks.length];
+    }
 
     // 2. Fallback: find any mark whose text contains the target text
     if (!foundMark) {
@@ -1329,14 +1529,41 @@ export default function App() {
     }
   };
 
-  const handleAutoCorrect = async (item: CheckResult) => {
-    pushUndo();
-    setFixingId(item.id);
+const handleAutoCorrect = async (item: CheckResult) => {
+  pushUndo();
+  setFixingId(item.id);
 
-    // For AI evaluation items with auto_correct_button, use AI to generate fix
-    if (item.auto_correct_button && item.source === 'ai') {
-      try {
-        const systemPrompt = `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+  // For AI evaluation items with auto_correct_button, use AI to generate fix
+  if (item.auto_correct_button && item.source === 'ai') {
+    try {
+      // For typo corrections, directly replace the exact word with suggested fix
+      if (item.category === 'Error' && item.target_highlight && item.target_highlight.exact_word) {
+        const targetWord = item.target_highlight.exact_word;
+        const suggestedFix = item.suggested_fix || targetWord;
+
+        // Find the word in the article and replace it precisely
+        const m = findTextMatch(article, targetWord);
+        if (!m) {
+          setFlashText('Teks typo tidak ditemukan di artikel.');
+          setTimeout(() => setFlashText(''), 3000);
+          return;
+        }
+        const correction = extractActualCorrection(suggestedFix);
+        const newArticle = article.slice(0, m.start) + correction + article.slice(m.end);
+
+        setArticleFromMarkdown(newArticle);
+        setHover(null);
+        const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
+        setLiveReport(newReport);
+        setReport(newReport);
+        requestAnimationFrame(() => applyHighlights(newReport));
+        setFlashText('Auto Correct berhasil.');
+        setTimeout(() => setFlashText(''), 3000);
+        return;
+      }
+
+      // For other cases (adding CTA, references, etc.), use AI-based approach
+      const systemPrompt = `Anda adalah asisten Auto-Correct Editor Konten Hukum.
 Tugas Anda memperbaiki SATU kriteria spesifik berikut.
 
 Kriteria: "${item.question}"
@@ -1345,79 +1572,80 @@ Alasan: "${item.reason}"
 ${item.suggested_fix ? `Saran perbaikan: ${item.suggested_fix}` : ''}
 
 ATURAN:
-- HANYA tambahkan konten yang diperlukan di akhir artikel (CTA, referensi, dll).
-- Jangan ubah teks yang sudah ada.
-- Kembalikan artikel lengkap dengan tambahan di bagian akhir.
+- Jika ini adalah koreksi typo, ganti kata yang salah dengan saran perbaikan langsung dalam teks.
+- Jika ini adalah penambahan konten (CTA, referensi, dll), tambahkan konten yang diperlukan di akhir artikel.
+- Jangan ubah teks yang tidak perlu diubah.
+- Kembalikan artikel lengkap dengan perubahan yang dilakukan.
 
 Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
 
-        const userPrompt = `Keyword: ${keyword || '-'}\nMeta Title: ${metaTitle || '-'}\nMeta Desc: ${metaDesc || '-'}\n\nARTIKEL:\n${article}`;
+      const userPrompt = `Keyword: ${keyword || '-'}\nMeta Title: ${metaTitle || '-'}\nMeta Desc: ${metaDesc || '-'}\n\nARTIKEL:\n${article}`;
 
-        const { content } = await callChatCompletion({
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          temperature: 0.2,
-          timeoutMs: 30000,
-          apiKey: OPENAI_API_KEY,
-        });
-
-        const parsed = JSON.parse(content);
-        const newArticle = typeof parsed.article === 'string' ? parsed.article : article;
-        setArticleFromMarkdown(newArticle);
-        if (typeof parsed.metaTitle === 'string') setMetaTitle(parsed.metaTitle);
-        if (typeof parsed.metaDesc === 'string') setMetaDesc(parsed.metaDesc);
-        setHover(null);
-        const newReport = runSopChecks({ article: newArticle, keyword, metaTitle: typeof parsed.metaTitle === 'string' ? parsed.metaTitle : metaTitle, metaDesc: typeof parsed.metaDesc === 'string' ? parsed.metaDesc : metaDesc });
-        setLiveReport(newReport);
-        setReport(newReport);
-        requestAnimationFrame(() => applyHighlights(newReport));
-        setFlashText('Auto Correct berhasil.');
-        setTimeout(() => setFlashText(''), 3000);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Gagal auto-correct.';
-        setFlashText(`Auto Correct gagal: ${msg}`);
-        setTimeout(() => setFlashText(''), 4000);
-      } finally {
-        setFixingId(null);
-      }
-      return;
-    }
-
-    try {
-      const result = await autoReviseItem(
-        { article, keyword, metaTitle, metaDesc },
-        item,
-        OPENAI_API_KEY,
-      );
-      const updatedKeyword = result.keyword || keyword;
-      const updatedTitle = result.metaTitle || metaTitle;
-      const updatedDesc = result.metaDesc || metaDesc;
-      setArticleFromMarkdown(result.article);
-      if (result.keyword) setKeyword(result.keyword);
-      if (result.metaTitle) setMetaTitle(result.metaTitle);
-      if (result.metaDesc) setMetaDesc(result.metaDesc);
-      setHover(null);
-      // Re-check and re-apply highlights immediately with the corrected content
-      const newReport = runSopChecks({
-        article: result.article,
-        keyword: updatedKeyword,
-        metaTitle: updatedTitle,
-        metaDesc: updatedDesc,
+      const { content } = await callChatCompletion({
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.2,
+        timeoutMs: 30000,
+        apiKey: OPENAI_API_KEY,
       });
+
+      const parsed = JSON.parse(content);
+      const newArticle = typeof parsed.article === 'string' ? parsed.article : article;
+      setArticleFromMarkdown(newArticle);
+      if (typeof parsed.metaTitle === 'string') setMetaTitle(parsed.metaTitle);
+      if (typeof parsed.metaDesc === 'string') setMetaDesc(parsed.metaDesc);
+      setHover(null);
+      const newReport = runSopChecks({ article: newArticle, keyword, metaTitle: typeof parsed.metaTitle === 'string' ? parsed.metaTitle : metaTitle, metaDesc: typeof parsed.metaDesc === 'string' ? parsed.metaDesc : metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
       requestAnimationFrame(() => applyHighlights(newReport));
+      setFlashText('Auto Correct berhasil.');
+      setTimeout(() => setFlashText(''), 3000);
     } catch (err: unknown) {
-      setHover(null);
-      const msg = err instanceof Error ? err.message : 'Gagal memperbaiki. Silakan coba lagi.';
-      setFlashText(`Auto Correct gagal: ${msg}`);
-      setTimeout(() => setFlashText(''), 4000);
+      const info = classifyAiError(err);
+      logAiError('auto-correct', info);
+      setError('auto-correct', info);
     } finally {
       setFixingId(null);
     }
-  };
+    return;
+  }
+
+  try {
+    const result = await autoReviseItem(
+      { article, keyword, metaTitle, metaDesc },
+      item,
+      OPENAI_API_KEY,
+    );
+    const updatedKeyword = result.keyword || keyword;
+    const updatedTitle = result.metaTitle || metaTitle;
+    const updatedDesc = result.metaDesc || metaDesc;
+    setArticleFromMarkdown(result.article);
+    if (result.keyword) setKeyword(result.keyword);
+    if (result.metaTitle) setMetaTitle(result.metaTitle);
+    if (result.metaDesc) setMetaDesc(result.metaDesc);
+    setHover(null);
+    // Re-check and re-apply highlights immediately with the corrected content
+    const newReport = runSopChecks({
+      article: result.article,
+      keyword: updatedKeyword,
+      metaTitle: updatedTitle,
+      metaDesc: updatedDesc,
+    });
+    setLiveReport(newReport);
+    setReport(newReport);
+    requestAnimationFrame(() => applyHighlights(newReport));
+  } catch (err: unknown) {
+    setHover(null);
+    const info = classifyAiError(err);
+    logAiError('auto-correct', info);
+    setError('auto-correct', info);
+  } finally {
+    setFixingId(null);
+  }
+};
 
   const handleAutoCorrectCase = (item: CheckResult) => {
     const text = item.problematic_text;
@@ -1426,26 +1654,14 @@ Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
     const handle = editorRef.current;
     if (!handle) return;
 
-    // Find the text in the markdown article and fix the case
+    // Find the text in the markdown article and fix the typo
     const md = htmlToMarkdown(handle.getHTML());
     const m = findTextMatch(md, text);
     if (!m) return;
 
-    const before = md.slice(Math.max(0, m.start - 3), m.start);
-    const isStartOfSentence = m.start === 0 || /[.!?]\s+$/.test(before) || /^\s+$/.test(before) || /^\n+$/.test(before);
-    const isAllUpper = text === text.toUpperCase() && text.length > 1;
-    let corrected: string;
-    if (isStartOfSentence) {
-      corrected = text.charAt(0).toUpperCase() + text.slice(1);
-    } else if (isAllUpper && text.length > 2) {
-      corrected = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
-    } else {
-      corrected = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
-    }
-    if (corrected === text) {
-      corrected = text.toLowerCase();
-      if (corrected === text) return;
-    }
+    // Always correct typo by capitalizing first letter and making rest lowercase
+    const corrected = text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+    if (corrected === text) return;
 
     const newMd = md.slice(0, m.start) + corrected + md.slice(m.end);
     setArticleFromMarkdown(newMd);
@@ -1456,9 +1672,49 @@ Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
     requestAnimationFrame(() => applyHighlights(newReport));
   };
 
+  const handleGenerateMetaDesc = async () => {
+    if (!article.trim()) {
+      setFlashText('Tulis artikel terlebih dahulu.');
+      setTimeout(() => setFlashText(''), 3000);
+      return;
+    }
+    setMetaDescLoading(true);
+    try {
+      const { content } = await callChatCompletion({
+        messages: [
+          {
+            role: 'system',
+            content: `Anda adalah SEO copywriter. Buat meta description yang optimal untuk artikel berikut.
+
+Aturan:
+- Panjang 120–160 karakter
+- Menarik, ringkas, mengandung kata kunci utama
+- Promosikan value artikel secara natural
+- Jangan gunakan tanda kutip dalam output
+
+Kembalikan JSON SAJA: { "metaDescription": "..." }`,
+          },
+          { role: 'user', content: stripImages(article).slice(0, 8000) },
+        ],
+        temperature: 0.3,
+        timeoutMs: 30_000,
+      });
+      const data = JSON.parse(content);
+      if (data.metaDescription) {
+        setMetaDesc(data.metaDescription.slice(0, 160));
+      }
+    } catch (err) {
+      const info = classifyAiError(err);
+      logAiError('meta-desc', info);
+      setError('meta-desc', info);
+    } finally {
+      setMetaDescLoading(false);
+    }
+  };
+
   const handleAnalyzeKeywords = async (source: 'ai' | 'manual' = 'ai') => {
     setKwGenLoading(true);
-    setKwGenError('');
+    clearError('keyword-gen');
     setAhrefsMetrics([]);
     setSelectedKeywords(new Set());
 
@@ -1467,7 +1723,7 @@ Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
     try {
       if (source === 'ai') {
         if (!article.trim()) {
-          setKwGenError('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');
+          setKwGenError('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');
           setKwGenLoading(false);
           return;
         }
@@ -1523,7 +1779,9 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
     } catch (err) {
       if (source === 'ai' && keywords.length === 0) {
         setAhrefsMetrics([]);
-        setKwGenError('Gagal: ' + (err instanceof Error ? err.message : 'Terjadi kesalahan'));
+        const info = classifyAiError(err);
+        logAiError('keyword-gen', info);
+        setError('keyword-gen', info);
       } else {
         const _fallbackMetrics = generateMockAhrefsMetrics(keywords.length > 0 ? keywords.slice(0, 10) : ['keyword']);
         setAhrefsMetrics(_fallbackMetrics);
@@ -1576,13 +1834,16 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
       setIsAnalyzing(true);
       setAiLoading(true);
       setAiResults(null);
-      setAiError(null);
+      clearError('sop-ai-eval');
       if (window.innerWidth < 768) setShowMobileEval(true);
       const sopReport = liveReport;
       window.setTimeout(() => {
-        applyHighlights(); // blocked when highlightsBlockedRef is true
-        setReport(liveReport);
-        setIsAnalyzing(false);
+        try {
+          applyHighlights(); // blocked when highlightsBlockedRef is true
+          setReport(liveReport);
+        } catch (e) {
+          console.warn('applyHighlights error in runAnalysis timeout:', e);
+        }
       }, 300);
 
       // Abort any previous analysis request
@@ -1612,6 +1873,13 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
             }
           }
           setAiResults(output);
+          // Build re-check cache from full results (merge to preserve AI detector cache)
+          const cacheArticle = stripImages(article);
+          const cacheParagraphs = splitIntoParagraphs(cacheArticle);
+          const freshCache = buildRecheckCacheFromFullResults(output, cacheParagraphs, computeArticleHash(cacheArticle));
+          recheckCacheRef.current = recheckCacheRef.current
+            ? { ...recheckCacheRef.current, ...freshCache }
+            : freshCache;
           const failedAi = output.results.filter(
             (r) => r.status === 'failed' && r.problematic_text?.trim().length > 0 && r.id !== 56,
           );
@@ -1624,10 +1892,13 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
         })
         .catch((err) => {
           if (err.name === 'AbortError') return;
-          setAiError(err instanceof Error ? err.message : 'Gagal terhubung ke AI.');
+          const info = classifyAiError(err);
+          logAiError('sop-ai-eval', info);
+          setError('sop-ai-eval', info);
           setAiResults({ results: [], subScores: { seo: 0, structure: 0, intent: 0, tone: 0 }, bestNextMove: '' });
         })
         .finally(() => {
+          setIsAnalyzing(false);
           if (!signal.aborted) setAiLoading(false);
           resolve();
         });
@@ -1635,15 +1906,103 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
   };
 
   const runAllChecks = async () => {
+    if (!article.trim()) {
+      console.warn('[Periksa] skipped: article is empty');
+      return;
+    }
+
     highlightsBlockedRef.current = true;
-    await Promise.all([
-      runAnalysis(),
-      handleDetectAI({ switchTab: false }),
-      handleCheckPlagiarism({ switchTab: false }),
-    ]);
-    highlightsBlockedRef.current = false;
-    setHasChecked(true);
-    requestAnimationFrame(() => applyHighlights());
+    incrementalAbortRef.current?.abort();
+    incrementalStateRef.current = buildInitialState();
+    setIncrementalResults([]);
+    clearAll();
+
+    try {
+      const cleanArticleForHash = stripImages(article);
+      const currentHash = computeArticleHash(cleanArticleForHash);
+      const cachedEntry = recheckCacheRef.current;
+      const articleChanged = !cachedEntry || cachedEntry.articleHash !== currentHash;
+      let aiEvalDone = false;
+
+      // Try incremental re-check if cache exists and article has changed
+      if (cachedEntry && articleChanged) {
+        const signal = new AbortController();
+        const incrementalResult = await runIncrementalRecheck(
+          { article: stripImages(article), keyword: stripImages(getPrimaryKeyword(keyword)), metaTitle: stripImages(metaTitle), metaDesc: stripImages(metaDesc) },
+          stripImages(article),
+          stripImages(getPrimaryKeyword(keyword)),
+          stripImages(metaTitle),
+          stripImages(metaDesc),
+          cachedEntry,
+          OPENAI_API_KEY,
+          signal.signal,
+        );
+
+        if (!signal.signal.aborted && incrementalResult) {
+          setAiResults({
+            results: incrementalResult.results,
+            subScores: incrementalResult.subScores,
+            bestNextMove: incrementalResult.bestNextMove,
+          });
+
+          recheckCacheRef.current = {
+            ...cachedEntry,
+            paragraphs: splitIntoParagraphs(stripImages(article)),
+            fullResults: incrementalResult.results,
+            articleHash: currentHash,
+          };
+
+          aiEvalDone = true;
+
+          // If no paragraphs actually changed, skip all LLM calls entirely
+          if (incrementalResult.usedCache) {
+            const cachedDetector = mergeAiDetectorIncremental(cachedEntry, splitIntoParagraphs(stripImages(article)));
+            if (cachedDetector && cachedEntry.fullAiDetectorResult) {
+              setAiDetectorResult({ ...cachedEntry.fullAiDetectorResult, sentences: cachedDetector.sentences });
+            } else {
+              setAiDetectorResult(null);
+            }
+            highlightsBlockedRef.current = false;
+            setHasChecked(true);
+            requestAnimationFrame(() => applyHighlights());
+            return;
+          }
+        }
+      }
+
+      // Run whatever LLM calls are still needed
+      if (aiEvalDone) {
+        await Promise.all([
+          handleDetectAI({ switchTab: false }),
+          handleCheckPlagiarism({ switchTab: false }),
+        ]);
+      } else if (!cachedEntry || articleChanged) {
+        await Promise.all([
+          runAnalysis(),
+          handleDetectAI({ switchTab: false }),
+          handleCheckPlagiarism({ switchTab: false }),
+        ]);
+      } else {
+        if (cachedEntry.fullAiDetectorResult) {
+          const cachedDetector = mergeAiDetectorIncremental(cachedEntry, splitIntoParagraphs(stripImages(article)));
+          if (cachedDetector) {
+            setAiDetectorResult({ ...cachedEntry.fullAiDetectorResult, sentences: cachedDetector.sentences });
+          }
+        }
+      }
+
+      highlightsBlockedRef.current = false;
+      setHasChecked(true);
+      requestAnimationFrame(() => applyHighlights());
+    } catch (err) {
+      console.error('[Periksa] unexpected error in runAllChecks:', err);
+    } finally {
+      highlightsBlockedRef.current = false;
+      setIsAnalyzing(false);
+      setAiLoading(false);
+      setAiDetectorLoading(false);
+      setPlagiarismLoading(false);
+    }
   };
 
   const handleDetectAI = async (opts?: { switchTab?: boolean }) => {
@@ -1651,16 +2010,25 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
       setAiDetectorLoading(true);
     setAiDetectorResult(null);
       try {
-        const result = await detectAIContent(stripImages(article));
+      const cleanArticle = stripImages(article);
+        const result = await detectAIContent(cleanArticle);
       setAiDetectorResult(result);
+      // Cache AI detector results by paragraph
+      const paragraphs = splitIntoParagraphs(cleanArticle);
+      const detectorCache = buildRecheckCacheFromAiDetector(result, paragraphs);
+      recheckCacheRef.current = recheckCacheRef.current
+        ? { ...recheckCacheRef.current, ...detectorCache }
+        : { articleHash: computeArticleHash(cleanArticle), paragraphs, paragraphResults: {}, fullResults: [], subScores: { seo: 0, structure: 0, intent: 0, tone: 0 }, bestNextMove: '', ...detectorCache };
       if (opts?.switchTab ?? true) setActiveEvalTab('ai-detector');
       if (window.innerWidth < 768) setShowMobileEval(true);
     } catch (err) {
+      const info = classifyAiError(err);
+      logAiError('ai-detector', info);
+      setError('ai-detector', info);
       setAiDetectorResult({
         provider: 'none',
         aiProbability: 0,
         humanProbability: 0,
-        error: err instanceof Error ? err.message : 'Gagal mendeteksi AI.',
       });
     } finally {
       setAiDetectorLoading(false);
@@ -1677,11 +2045,13 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
       if (opts?.switchTab ?? true) setActiveEvalTab('plagiarism');
       if (window.innerWidth < 768) setShowMobileEval(true);
     } catch (err) {
+      const info = classifyAiError(err);
+      logAiError('plagiarism', info);
+      setError('plagiarism', info);
       setPlagiarismResult({
         provider: 'none',
         plagiarismScore: 0,
         matchedSources: [],
-        error: err instanceof Error ? err.message : 'Gagal memeriksa plagiasi.',
       });
     } finally {
       setPlagiarismLoading(false);
@@ -2051,7 +2421,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
     setReport(null);
     setLiveReport(null);
     setAiResults(null);
-    setAiError(null);
+    clearAll();
     setAiDetectorResult(null);
     setPlagiarismResult(null);
     setHasChecked(false);
@@ -2397,9 +2767,21 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             </div>
             
             <div id="meta-desc-field" className="section-meta-desc bg-white rounded-xl border border-surface-200 p-3 shadow-sm transition-all duration-300 hover:shadow-md hover:border-brand-300 group hover:-translate-y-0.5">
-              <label htmlFor="input-desc" className="block text-[10px] font-bold uppercase tracking-wider text-surface-500 mb-1.5 transition-colors group-focus-within:text-brand-600">
-                Deskripsi
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label htmlFor="input-desc" className="text-[10px] font-bold uppercase tracking-wider text-surface-500 transition-colors group-focus-within:text-brand-600">
+                  Deskripsi
+                </label>
+                <button
+                  id="btn-desc-generate"
+                  type="button"
+                  onClick={handleGenerateMetaDesc}
+                  disabled={metaDescLoading}
+                  className="p-1 rounded-md text-brand-600 hover:text-brand-700 hover:bg-brand-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Generate deskripsi dengan AI"
+                >
+                  {metaDescLoading ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+                </button>
+              </div>
               <div className="relative">
                 <input
                   id="input-desc"
@@ -2436,7 +2818,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         </section>
 
         {/* Row 1 Col 2: Skor Sampingan */}
-        <section id="score-panel" className={`score-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 overflow-y-auto panel transition-all duration-300 hover:shadow-lg`}>
+        <section id="score-panel" className={`score-panel-section ${showMobileEval ? 'hidden' : 'flex'} md:flex flex-col min-w-0 overflow-y-auto panel transition-all duration-300 hover:shadow-lg bg-gradient-to-b from-white to-amber-50/20`}>
           <div className="accent-stripe shrink-0" />
           <div className="p-4 flex flex-col h-full">
             {/* Header */}
@@ -2487,10 +2869,10 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               </div>
             ) : (
               /* Ring chart + Sub-scores side by side */
-              <div className="score-results-state flex items-start gap-5 mb-4 animate-slide-in-right">
+              <div className="score-results-state flex items-start gap-6 mb-4 animate-slide-in-right">
                 {/* Ring chart */}
-                <div className="relative w-24 h-24 shrink-0 group">
-                  <svg className="w-24 h-24 -rotate-90 transform transition-transform duration-500 group-hover:scale-105" viewBox="0 0 36 36">
+                <div className="relative w-28 h-28 shrink-0 group">
+                  <svg className="w-28 h-28 -rotate-90 transform transition-transform duration-500 group-hover:scale-105" viewBox="0 0 36 36">
                     <circle cx="18" cy="18" r="15.5" fill="none" stroke="#f1f5f9" strokeWidth="3" />
                     <circle cx="18" cy="18" r="15.5" fill="none"
                       stroke={score >= 80 ? '#10b981' : score >= 60 ? '#f59e0b' : '#ef4444'}
@@ -2498,21 +2880,24 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       strokeLinecap="round" className="transition-all duration-1000 ease-out" />
                   </svg>
                   <div className="absolute inset-0 flex flex-col items-center justify-center">
-                    <span className={`text-2xl font-black tracking-tight leading-none ${statusConfig?.color}`}>{score}</span>
+                    <span className={`text-3xl font-black tracking-tighter leading-none ${statusConfig?.color || 'text-surface-900'}`}>{animatedScore}</span>
                     <span className="text-[9px] font-medium text-surface-400 mt-1 uppercase tracking-wider">of 100</span>
                   </div>
                 </div>
                 {/* Sub-scores */}
                 <div className="grid grid-cols-2 gap-2 flex-1 min-w-0">
                   {([
-                    { label: 'SEO', value: aiResults?.subScores?.seo || 0 },
-                    { label: 'Structure', value: aiResults?.subScores?.structure || 0 },
-                    { label: 'Intent', value: aiResults?.subScores?.intent || 0 },
-                    { label: 'Tone', value: aiResults?.subScores?.tone || 0 },
-                  ] as const).map(({ label, value }) => (
-                    <div key={label} className="flex flex-col items-center justify-center p-2.5 bg-surface-50 rounded-xl border border-surface-100 transition-all duration-300 hover:shadow-sm hover:-translate-y-0.5 hover:bg-white group cursor-default">
-                      <span className={`text-[15px] font-black tracking-tight ${value >= 80 ? 'text-emerald-600' : value >= 60 ? 'text-amber-500' : 'text-red-500'} group-hover:scale-110 transition-transform`}>{value}</span>
-                      <span className="text-[9px] text-surface-500 font-semibold uppercase tracking-wider mt-0.5">{label}</span>
+                    { label: 'SEO', value: aiResults?.subScores?.seo || 0, icon: Search },
+                    { label: 'Structure', value: aiResults?.subScores?.structure || 0, icon: Layers },
+                    { label: 'Intent', value: aiResults?.subScores?.intent || 0, icon: Crosshair },
+                    { label: 'Tone', value: aiResults?.subScores?.tone || 0, icon: Volume2 },
+                  ] as const).map(({ label, value, icon: Icon }) => (
+                    <div key={label} className={`flex flex-col justify-center p-2.5 rounded-xl border transition-all duration-300 hover:shadow-sm hover:-translate-y-0.5 group cursor-default ${value >= 80 ? 'bg-emerald-50/50 border-emerald-200 border-l-4 border-l-emerald-500' : value >= 60 ? 'bg-amber-50/50 border-amber-200 border-l-4 border-l-amber-500' : 'bg-red-50/30 border-red-200 border-l-4 border-l-red-400'}`}>
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <Icon className={`w-3 h-3 ${value >= 80 ? 'text-emerald-500' : value >= 60 ? 'text-amber-500' : 'text-red-400'}`} />
+                        <span className="text-[9px] text-surface-500 font-semibold uppercase tracking-wider">{label}</span>
+                      </div>
+                      <span className={`text-lg font-black tracking-tight ${value >= 80 ? 'text-emerald-700' : value >= 60 ? 'text-amber-700' : 'text-red-600'}`}>{value}</span>
                     </div>
                   ))}
                 </div>
@@ -2521,12 +2906,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
 
             {/* Best next move */}
             {aiResults?.bestNextMove && !aiLoading && (
-              <div className="score-best-move bg-gradient-to-br from-brand-50 to-white border border-brand-100 rounded-xl p-4 shadow-sm animate-fade-in mt-auto hover:shadow-md transition-shadow duration-300 group">
+              <div className="score-best-move bg-gradient-to-br from-amber-50 to-white border border-amber-100 rounded-xl p-4 shadow-sm animate-fade-in mt-auto hover:shadow-md transition-shadow duration-300 group">
                 <div className="flex items-center gap-2 mb-2">
-                  <div className="bg-brand-100 p-1.5 rounded-md group-hover:bg-brand-600 transition-colors duration-300">
-                    <Sparkles className="w-3.5 h-3.5 text-brand-600 group-hover:text-white transition-colors" />
+                  <div className="bg-amber-100 p-1.5 rounded-md group-hover:bg-amber-600 transition-colors duration-300">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-600 group-hover:text-white transition-colors" />
                   </div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-brand-800">Best Next Move</span>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">Best Next Move</span>
                 </div>
                 <p className="text-[12px] text-surface-700 leading-relaxed">{aiResults.bestNextMove}</p>
               </div>
@@ -2985,17 +3370,26 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         {/* Row 2 Col 2: Evaluasi Artikel */}
         <aside id="eval-panel" className={`eval-panel-section ${showMobileEval ? 'flex' : 'hidden'} md:flex flex-col min-w-0 panel overflow-hidden transition-all duration-300 hover:shadow-lg`} style={{ minHeight: '680px', height: '680px' }}>
           <div className="accent-stripe shrink-0" />
-          <div id="eval-header" className="px-5 py-3.5 border-b border-surface-100 bg-surface-50/30">
+          <div id="eval-header" className="px-5 py-3.5 border-b border-surface-100 bg-amber-50/20">
             <div className="flex items-center justify-between">
               <h2 id="eval-title" className="text-sm font-bold text-surface-900 font-display">Evaluasi Artikel</h2>
               <button
                 id="btn-periksa"
                 type="button"
-                onClick={runAllChecks}
-                disabled={isAnalyzing || aiLoading || aiDetectorLoading || plagiarismLoading || !article.trim()}
+                onClick={async () => {
+                  if (checkingRef.current) return;
+                  checkingRef.current = true;
+                  try {
+                    await runAllChecks();
+                  } finally {
+                    checkingRef.current = false;
+                  }
+                }}
+                disabled={checkingRef.current || !article.trim()}
+                title={!article.trim() ? 'Tulis artikel terlebih dahulu.' : 'Jalankan pengecekan SOP, AI, dan plagiarisme'}
                 className="flex items-center gap-1.5 px-3 py-2 bg-gradient-to-br from-brand-700 to-brand-600 text-white text-xs font-bold rounded-lg hover:shadow-md hover:from-brand-800 hover:to-brand-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-sm shadow-brand-700/20 group"
               >
-                {isAnalyzing || aiLoading || aiDetectorLoading || plagiarismLoading ? (
+                {checkingRef.current ? (
                   <>
                     <Loader className="w-3.5 h-3.5 text-white animate-spin" /> Memeriksa...
                   </>
@@ -3027,6 +3421,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               ))}
             </div>
           </div>
+
+          {aiFeatureErrors['auto-correct'] && (
+            <div className="px-5 pt-3">
+              <AiErrorFallback feature="auto-correct" onDismiss={() => clearError('auto-correct')} />
+            </div>
+          )}
 
           <div data-eval-panel className="flex-1 overflow-y-auto min-h-0 p-5 pb-20 md:pb-5">
             {(() => {
@@ -3108,21 +3508,20 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                             ignoredIdsRef.current = next;
                           }
                         };
-                        const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
+                        const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean, index: number) => {
                           const iss = getCategoryIssue(activeReport, cat.id);
                           const st = getCategoryStatus(activeReport, cat.id);
                           const isPassed = st === 'passed';
                           const isInfo = st === 'info';
                           const allIgnored = activeReport.items.filter((item) => cat.checks.includes(item.id)).every((item) => ignoredIds.has(item.id) || item.status === 'passed');
-                          const I = isPassed ? CheckCircle2 : isInfo ? AlertCircle : XCircle;
-                          const co = isPassed ? 'text-emerald-500' : isInfo ? 'text-blue-500' : st === 'deferred' ? 'text-gray-400' : 'text-red-500';
+                          const badgeColor = isPassed ? 'bg-emerald-500' : isInfo ? 'bg-amber-500' : st === 'deferred' ? 'bg-gray-300' : 'bg-red-500';
                           const itemForReason = iss || activeReport.items.find((item) => cat.checks.includes(item.id));
                           const isIgnored = allIgnored && !isPassed;
                           return (
                             <div key={cat.id} className="flex items-center gap-1">
                               <button type="button" onClick={() => clickable && iss && !isIgnored && focusIssue(iss)} disabled={!clickable || isIgnored}
                                 className={`flex-1 flex items-center gap-2.5 p-2.5 rounded-xl border transition text-left group ${clickable && !isPassed && !isIgnored ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : isPassed || isIgnored ? 'bg-gray-50/50 border-gray-100 cursor-default' : 'bg-gray-50/60 border-transparent cursor-default'}`}>
-                                <I className={`w-4 h-4 shrink-0 ${co}`} />
+                                <span className={`w-5 h-5 shrink-0 rounded-lg ${badgeColor} text-white text-[10px] font-bold flex items-center justify-center`}>{index + 1}</span>
                                 <div className="flex-1 min-w-0">
                                   <div className={`text-xs font-medium ${isPassed || isIgnored ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
                                   {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">
@@ -3139,14 +3538,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                               {!isPassed && !allIgnored && (
                                 <button type="button" onClick={() => toggleCategoryIgnore(cat.id)}
                                   className="shrink-0 p-2 rounded-lg hover:bg-gray-100 transition text-gray-400 hover:text-gray-600"
-                                  title="Abaikan issue ini">
+                                  title="Abaikan issue ini"
+                                >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
                               )}
                               {!isPassed && allIgnored && (
                                 <button type="button" onClick={() => toggleCategoryIgnore(cat.id)}
                                   className="shrink-0 p-2 rounded-lg hover:bg-gray-100 transition text-blue-400 hover:text-blue-600"
-                                  title="Batalkan abaikan">
+                                  title="Batalkan abaikan"
+                                >
                                   <RotateCcw className="w-3.5 h-3.5" />
                                 </button>
                               )}
@@ -3155,9 +3556,9 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         };
                         return (
                           <>
-                            {a.length > 0 && <div className="space-y-2"><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
-                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="text-[10px] font-semibold text-blue-600 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c) => renderRow(c, false))}</div>}
-                            {d.length > 0 && <div className={(a.length > 0 || b.length > 0) ? 'mt-5 space-y-2' : 'space-y-2'}><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Tidak dapat diarahkan</div>{d.map((c) => renderRow(c, false))}</div>}
+                            {a.length > 0 && <div className="space-y-2"><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Dapat diperbaiki</div>{a.map((c, i) => renderRow(c, true, i))}</div>}
+                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="text-[10px] font-semibold text-amber-600 uppercase tracking-wider mb-1.5 px-0.5">Informasi</div>{b.map((c, i) => renderRow(c, false, i))}</div>}
+                            {d.length > 0 && <div className={(a.length > 0 || b.length > 0) ? 'mt-5 space-y-2' : 'space-y-2'}><div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5 px-0.5">Tidak dapat diarahkan</div>{d.map((c, i) => renderRow(c, false, i))}</div>}
                             {c.length > 0 && (
                               <div className="mt-4 pt-3 border-t border-gray-100">
                                 <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
@@ -3169,7 +3570,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                 </button>
                                 {showPassedIssues && (
                                   <div className="mt-1.5 space-y-1">
-                                    {c.map((cat) => renderRow(cat, false))}
+                                    {c.map((cat, i) => renderRow(cat, false, i))}
                                   </div>
                                 )}
                               </div>
@@ -3209,7 +3610,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         return (
                           <>
                             <div className="space-y-5">
-                              {aiResults.results.map((r) => {
+                              {aiResults.results.map((r, aiIdx) => {
                                 const score = r.aiConfidence || 0;
                                 const passed = r.status === 'passed';
                                 const isInfo = r.status === 'info';
@@ -3217,26 +3618,22 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                 const hasText = !!r.problematic_text?.trim();
                                 const isIgnored = ignoredIds.has(r.id);
                                 const hasAutoCorrect = r.auto_correct_button;
-                                const Card = (hasText && !passed && !isIgnored) ? 'button' : 'div';
-                                const cardProps = (hasText && !passed && !isIgnored) ? { type: 'button' as const, onClick: () => focusIssue(r) } : {};
+                                const Card = 'div';
+                                const cardProps = (hasText && !passed && !isIgnored) ? { role: 'button' as const, tabIndex: 0, onClick: () => focusIssue(r), onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); focusIssue(r); } } } : {};
                                 return (
                                   <div key={r.id} className="flex items-start gap-1">
                                     <Card {...cardProps}
                                       className={`flex-1 flex flex-col p-3 rounded-xl border text-left transition group ${hasText && !passed && !isIgnored ? 'bg-white border-gray-200 hover:bg-gray-50 cursor-pointer' : 'bg-white border-gray-100'}`}
                                     >
                                       <div className="flex items-start gap-2.5">
-                                        {passed ? (
-                                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                                        ) : isInfo ? (
-                                          <AlertCircle className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" />
-                                        ) : (
-                                          <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                                        )}
+                                        <span className={`w-5 h-5 shrink-0 rounded-lg text-white text-[10px] font-bold flex items-center justify-center mt-0.5 ${passed ? 'bg-emerald-400' : isInfo ? 'bg-amber-500' : 'bg-red-500'}`}>
+                                          {passed ? '\u2713' : aiIdx + 1}
+                                        </span>
                                         <div className="flex-1 min-w-0">
                                           <div className="flex items-center gap-2 mb-0.5">
                                             <div className="text-[11px] font-medium text-gray-800 leading-snug">{r.question}</div>
                                             {!passed && r.category && (
-                                              <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${isError ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-blue-50 text-blue-600 border border-blue-200'}`}>
+                                              <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${isError ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-amber-50 text-amber-600 border border-amber-200'}`}>
                                                 {r.category}
                                               </span>
                                             )}
@@ -3246,7 +3643,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                             <div className="mt-1 text-[10px] text-gray-400 bg-gray-50 border border-gray-200 px-2 py-1 rounded">&ldquo;{r.problematic_text}&rdquo;</div>
                                           )}
                                           {r.suggested_fix && !passed && (
-                                            <div className="mt-1.5 text-[10px] text-brand-700 bg-brand-50 border border-brand-200 px-2 py-1 rounded">
+                                            <div className="mt-1.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded">
                                               Saran: {r.suggested_fix}
                                             </div>
                                           )}
@@ -3264,27 +3661,29 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                         </div>
                                         {!passed && (
                                           <div className="flex flex-col items-center gap-1 shrink-0 min-w-[24px]">
-                                            <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : isInfo ? 'text-blue-500' : 'text-red-500'}`}>{score}</span>
+                                            <span className={`text-[10px] font-bold ${passed ? 'text-emerald-600' : isInfo ? 'text-amber-600' : 'text-red-500'}`}>{score}</span>
                                           </div>
                                         )}
                                       </div>
                                       {!passed && (
                                         <div className="mt-2 w-full h-1 bg-gray-100 rounded-full overflow-hidden">
-                                          <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : isInfo ? 'bg-blue-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
+                                          <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : isInfo ? 'bg-amber-400' : 'bg-red-400'}`} style={{ width: `${score}%` }} />
                                         </div>
                                       )}
                                     </Card>
                                     {!passed && !isIgnored && (
                                       <button type="button" onClick={() => toggleAiIgnore(r.id)}
                                         className="shrink-0 p-2 rounded-lg hover:bg-gray-100 transition text-gray-400 hover:text-gray-600 mt-2"
-                                        title="Abaikan issue ini">
+                                        title="Abaikan issue ini"
+                                      >
                                         <X className="w-3.5 h-3.5" />
                                       </button>
                                     )}
                                     {!passed && isIgnored && (
                                       <button type="button" onClick={() => toggleAiIgnore(r.id)}
                                         className="shrink-0 p-2 rounded-lg hover:bg-gray-100 transition text-blue-400 hover:text-blue-600 mt-2"
-                                        title="Batalkan abaikan">
+                                        title="Batalkan abaikan"
+                                      >
                                         <RotateCcw className="w-3.5 h-3.5" />
                                       </button>
                                     )}
@@ -3296,19 +3695,16 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         );
                       })()}
                       {aiResults && aiResults.results.length === 0 && (
-                        <div className={`flex items-center gap-2.5 p-3 rounded-xl border ${aiError ? 'bg-red-50 border-red-100' : 'bg-emerald-50 border-emerald-100'}`}>
-                          {aiError ? (
-                            <>
-                              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
-                              <span className="text-[11px] text-red-700 leading-relaxed">{aiError || 'Evaluasi AI gagal. Pastikan Ollama berjalan dan API key valid.'}</span>
-                            </>
+                        <>
+                          {aiFeatureErrors['sop-ai-eval'] ? (
+                            <AiErrorFallback feature="sop-ai-eval" onRetry={() => runAnalysis()} onDismiss={() => clearError('sop-ai-eval')} />
                           ) : (
-                            <>
+                            <div className="flex items-center gap-2.5 p-3 rounded-xl border bg-emerald-50 border-emerald-100">
                               <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
                               <span className="text-[11px] text-emerald-700 leading-relaxed">AI tidak menemukan masalah pada artikel ini.</span>
-                            </>
+                            </div>
                           )}
-                        </div>
+                        </>
                       )}
                     </div>
                   ) : null}
@@ -3335,13 +3731,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         </div>
                       )}
 
-                      {aiDetectorResult?.error && (
-                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-100 text-xs text-amber-700 leading-relaxed">
-                          {aiDetectorResult.error}
-                        </div>
+                      {aiFeatureErrors['ai-detector'] && (
+                        <AiErrorFallback feature="ai-detector" onRetry={() => handleDetectAI()} onDismiss={() => clearError('ai-detector')} />
                       )}
 
-                      {aiDetectorResult && !aiDetectorResult.error && (
+                      {aiDetectorResult && !aiFeatureErrors['ai-detector'] && (
                         <div className="space-y-4">
                           <div className="flex items-center gap-4">
                             <div className="relative w-20 h-20 shrink-0">
@@ -3427,13 +3821,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         </div>
                       )}
 
-                      {plagiarismResult?.error && (
-                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-100 text-xs text-amber-700 leading-relaxed">
-                          {plagiarismResult.error}
-                        </div>
+                      {aiFeatureErrors['plagiarism'] && (
+                        <AiErrorFallback feature="plagiarism" onRetry={() => handleCheckPlagiarism()} onDismiss={() => clearError('plagiarism')} />
                       )}
 
-                      {plagiarismResult && !plagiarismResult.error && (
+                      {plagiarismResult && !aiFeatureErrors['plagiarism'] && (
                         <div className="space-y-4">
                           <div className="flex items-center gap-4">
                             <div className="relative w-20 h-20 shrink-0">
@@ -3563,6 +3955,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 </div>
               )}
 
+              {aiFeatureErrors['keyword-gen'] && (
+                <div className="mb-3">
+                  <AiErrorFallback feature="keyword-gen" onDismiss={() => clearError('keyword-gen')} />
+                </div>
+              )}
               {kwGenError && (
                 <div id="kw-modal-error" className="mb-3 p-2.5 rounded-lg bg-red-50 border border-red-100 text-xs text-red-600">{kwGenError}</div>
               )}
@@ -3805,10 +4202,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .editor-surface blockquote { border-left: 3px solid #b91c1c; padding-left: 1rem; color: #4b5563; font-style: italic; }
         .editor-surface a { color: #b91c1c; text-decoration: underline; }
         .editor-surface img { max-width: 100%; border-radius: 0.5rem; }
-        .editor-surface ::selection {
-          background-color: rgba(239, 68, 68, 0.3);
-          color: inherit;
-        }
+
         .issue-highlight {
           background-color: rgba(254, 226, 226, 0.7);
           border-bottom: 2px solid rgba(239, 68, 68, 0.3);
@@ -3878,5 +4272,13 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .scrollbar-hide::-webkit-scrollbar { display: none; }
       `}</style>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AiErrorProvider>
+      <AppContent />
+    </AiErrorProvider>
   );
 }

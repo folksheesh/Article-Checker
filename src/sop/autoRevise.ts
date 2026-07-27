@@ -138,21 +138,21 @@ function ensureLinks(article: string): string {
 
   const hasSuggested = /baca juga|suggested|artikel terkait/i.test(article);
   if (!hasSuggested || linkCount < MIN_INTERNAL_LINKS + MIN_SUGGESTED_POSTS) {
-    const block = [
-      'Baca juga: [Artikel Terkait 1](#), [Artikel Terkait 2](#), [Artikel Terkait 3](#)',
-      'Internal Link: [Layanan Kami](#), [Panduan Lengkap](#)',
-    ].join('\n');
-    const lines = next.split(/\r?\n/);
-    const lastContentIdx = [...lines]
-      .map((l, i) => ({ l, i }))
-      .reverse()
-      .find((x) => x.l.trim().length > 0)?.i;
-    if (lastContentIdx != null && CTA_KEYWORDS.some((k) => lines[lastContentIdx].toLowerCase().includes(k))) {
-      lines.splice(lastContentIdx, 0, '', block, '');
-      next = lines.join('\n');
-    } else {
-      next = `${next.trimEnd()}\n\n${block}\n`;
-    }
+  const block = [
+    'Baca juga: [Artikel Terkait 1](#), [Artikel Terkait 2](#), [Artikel Terkait 3](#)',
+    'Internal Link: [Layanan Kami](#), [Panduan Lengkap](#)',
+  ].join('\n');
+  const lines = next.split(/\r?\n/);
+  const lastContentIdx = [...lines]
+    .map((l, i) => ({ l, i }))
+    .reverse()
+    .find((x) => x.l.trim().length > 0)?.i;
+  if (lastContentIdx != null && CTA_KEYWORDS.some((k) => lines[lastContentIdx].toLowerCase().includes(k))) {
+    lines.splice(lastContentIdx, 0, '', block, '');
+    next = lines.join('\n');
+  } else {
+    next = `${next.trimEnd()}\n\n${block}\n`;
+  }
   }
   return next;
 }
@@ -222,14 +222,13 @@ function ensureHow(article: string, keyword: string): string {
     topic.includes('usaha') || topic.includes('bisnis') ? 'Usaha' :
     topic.includes('hukum') || topic.includes('legal') ? 'Hukum' : 'Prosedur';
   const block = [
-    '',
     `## 1. Pahami Syarat ${base} yang Berlaku`,
     `Langkah awal adalah memahami persyaratan ${topic.toLowerCase()} secara menyeluruh agar tidak ada tahap terlewat.`,
     '',
     `## 2. Siapkan Dokumen Pendukung`,
     'Kumpulkan dokumen dan informasi yang dibutuhkan agar proses berjalan lancar dan cepat.',
   ].join('\n');
-  return `${article.trimEnd()}\n${block}\n`;
+  return `${article.trimEnd()}\n\n${block}\n`;
 }
 
 function ensureWhat(article: string, keyword: string): string {
@@ -251,24 +250,32 @@ function shortenLeadDeterministic(article: string, keyword: string): string {
   const sentencesOk = parsed.leadSentenceCount === 2;
   if (wordsOk || sentencesOk) return article;
 
-  const parts = parsed.lead.split(/(?<=[.!?])\s+/).filter(Boolean);
+  // Operate on the raw markdown line so markdown link syntax (e.g. [text](url))
+  // is preserved instead of being lost when stripped via parsed.lead.
+  const lines = article.split(/\r?\n/);
+  const leadLineIdx = parsed.bodyParagraphs[0]?.lineIndex;
+  if (leadLineIdx == null) return article;
+  const rawLead = lines[leadLineIdx];
+  if (!rawLead.trim()) return article;
+
+  const parts = rawLead.split(/(?<=[.!?])\s+/).filter(Boolean);
   if (parts.length >= 2) {
     const shortLead = `${parts[0].trim()} ${parts[1].trim()}`;
     if (shortLead.split(/\s+/).length <= LEAD_TARGET_WORDS + 2) {
-      return replaceLead(article, shortLead);
+      lines[leadLineIdx] = shortLead;
+      return lines.join('\n');
     }
   }
-  const words = parsed.lead.split(/\s+/);
+  const words = rawLead.split(/\s+/);
   if (words.length > LEAD_TARGET_WORDS) {
     const topic = keyword || parsed.title;
     const truncated = words.slice(0, LEAD_TARGET_WORDS).join(' ');
-    return replaceLead(article, `${truncated.replace(/[,;]+$/, '')}. Pelajari langkah penting ${topic} dan cara menghindari risikonya.`);
+    lines[leadLineIdx] = `${truncated.replace(/[,;]+$/, '')}. Pelajari langkah penting ${topic} dan cara menghindari risikonya.`;
+    return lines.join('\n');
   }
   if (parsed.leadWordCount < 11 && parsed.leadSentenceCount !== 2) {
-    return replaceLead(
-      article,
-      `${parsed.lead.replace(/[.!?]+$/, '')}. Simak panduan lengkapnya untuk menghindari risiko hukum yang merugikan.`,
-    );
+    lines[leadLineIdx] = `${rawLead.replace(/[.!?]+$/, '')}. Simak panduan lengkapnya untuk menghindari risiko hukum yang merugikan.`;
+    return lines.join('\n');
   }
   return article;
 }
@@ -410,6 +417,10 @@ Kembalikan JSON:
 
   const parsed = JSON.parse(content);
   let outArticle = typeof parsed.article === 'string' ? parsed.article : input.article;
+  // Sanitize AI response: convert any raw HTML <a> tags to markdown link syntax
+  // The AI is asked to return markdown but may return HTML — this prevents
+  // <a> tags from being HTML-escaped and displayed as raw text.
+  outArticle = outArticle.replace(/<a\s+[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi, '[$2]($1)');
   images.forEach((img, i) => {
     outArticle = outArticle.replace(`[[GAMBAR_${i}]]`, img);
   });
@@ -534,7 +545,7 @@ export async function autoReviseItem(
     };
   }
 
-  const effectiveApiKey = apiKey.trim();
+  const effectiveApiKey = (apiKey ?? '').trim();
   let newKeyword: string | undefined;
 
   if (KEYWORD_IDS.includes(item.id)) {

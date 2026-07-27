@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useImperativeHandle, forwardRef, useRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -6,6 +6,9 @@ import Link from '@tiptap/extension-link';
 import Image from '@tiptap/extension-image';
 import Placeholder from '@tiptap/extension-placeholder';
 import TextAlign from '@tiptap/extension-text-align';
+import { Extension } from '@tiptap/core';
+import { Plugin } from 'prosemirror-state';
+import { Decoration, DecorationSet } from 'prosemirror-view';
 import { HighlightMark } from './HighlightMark';
 
 export type ToolbarAction = 'bold' | 'italic' | 'underline' | 'h1' | 'h2' | 'h3' | 'bullet' | 'number' | 'quote' | 'link' | 'image' | 'align-left' | 'align-center' | 'align-right' | 'align-justify';
@@ -27,6 +30,13 @@ export type ActiveStyleState = {
   link?: boolean;
 };
 
+export interface HighlightDecoration {
+  from: number;
+  to: number;
+  cls: string;
+  attrs?: Record<string, string>;
+}
+
 export interface TipTapEditorHandle {
   getHTML: () => string;
   setContent: (html: string) => void;
@@ -35,6 +45,10 @@ export interface TipTapEditorHandle {
   isActive: (name: string, attrs?: Record<string, unknown>) => boolean;
   getEditorEl: () => HTMLElement | null;
   insertImage: (attrs: { src: string; alt?: string; width?: number }) => void;
+  setDecorations: (decos: HighlightDecoration[]) => void;
+  clearDecorations: () => void;
+  /** Returns the ProseMirror document for text searching (read-only). */
+  getDoc: () => any;
 }
 
 interface Props {
@@ -195,6 +209,22 @@ function sanitizePastedHtml(html: string): string {
 }
 
 export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialContent, onUpdate, onActiveStylesChange, onEditorClick, onEditorMouseOver, placeholder }, ref) => {
+  const highlightPlugin = new Plugin({
+    state: {
+      init() { return DecorationSet.empty; },
+      apply(tr, set) {
+        const meta = tr.getMeta('highlightDecorations');
+        if (meta !== undefined) return meta;
+        return set.map(tr.mapping, tr.doc);
+      },
+    },
+    props: {
+      decorations(state) {
+        return highlightPlugin.getState(state);
+      },
+    },
+  });
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -208,6 +238,12 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
       Placeholder.configure({ placeholder: placeholder || 'Mulai menulis artikel Anda di sini...' }),
       TextAlign.configure({ types: ['heading', 'paragraph'] }),
       HighlightMark,
+      Extension.create({
+        name: 'highlightDecoration',
+        addProseMirrorPlugins() {
+          return [highlightPlugin];
+        },
+      }),
     ],
     content: initialContent,
     onUpdate: ({ editor }) => {
@@ -322,6 +358,19 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
     insertImage: (attrs) => {
       editor?.chain().focus().setImage({ src: attrs.src }).run();
     },
+    setDecorations: (decos: HighlightDecoration[]) => {
+      if (!editor) return;
+      const d = decos.map(({ from, to, cls, attrs }) =>
+        Decoration.inline(from, to, { class: cls, nodeName: 'mark', ...(attrs || {}) }, {}),
+      );
+      const set = DecorationSet.create(editor.state.doc, d);
+      editor.view.dispatch(editor.state.tr.setMeta('highlightDecorations', set));
+    },
+    clearDecorations: () => {
+      if (!editor) return;
+      editor.view.dispatch(editor.state.tr.setMeta('highlightDecorations', DecorationSet.empty));
+    },
+    getDoc: () => editor?.state.doc ?? null,
   }), [editor]);
 
   useEffect(() => {

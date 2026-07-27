@@ -43,10 +43,10 @@ export async function callChatCompletion({
   apiKey,
   stripJsonBlock = true,
 }: ChatCompletionOptions): Promise<ChatCompletionResult> {
-  const geminiKey = (apiKey ?? '').trim() || GEMINI_API_KEY.trim();
-  const openAiKey = OPENAI_API_KEY.trim();
-  const huggingfaceKey = HUGGINGFACE_API_KEY.trim();
-  const ollamaKey = OLLAMA_API_KEY.trim();
+  const geminiKey = (apiKey ?? '').trim() || (GEMINI_API_KEY ?? '').trim();
+  const openAiKey = (OPENAI_API_KEY ?? '').trim();
+  const huggingfaceKey = (HUGGINGFACE_API_KEY ?? '').trim();
+  const ollamaKey = (OLLAMA_API_KEY ?? '').trim();
   const geminiModel = model || GEMINI_MODEL;
   const openAiModel = model || OPENAI_MODEL;
   const huggingfaceModel = model || HUGGINGFACE_MODEL;

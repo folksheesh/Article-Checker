@@ -1,0 +1,190 @@
+{
+  "scorePanel": {
+    "w": 415,
+    "h": 355,
+    "children": 2
+  },
+  "scoreTexts": [
+    {
+      "text": "Live score",
+      "fontSize": "14px",
+      "fontWeight": "700",
+      "color": "rgb(17, 24, 39)",
+      "fontFamily": "Plus Jakarta Sans"
+    },
+    {
+      "text": "Prioritas langkah selanjutnya.",
+      "fontSize": "10px",
+      "fontWeight": "400",
+      "color": "rgb(148, 163, 184)",
+      "fontFamily": "Inter"
+    },
+    {
+      "text": "Belum Ada Skor",
+      "fontSize": "14px",
+      "fontWeight": "700",
+      "color": "rgb(51, 65, 85)",
+      "fontFamily": "Inter"
+    },
+    {
+      "text": "Periksa",
+      "fontSize": "11px",
+      "fontWeight": "700",
+      "color": "rgb(220, 38, 38)",
+      "fontFamily": "Inter"
+    }
+  ],
+  "evalPanel": {
+    "w": 415,
+    "h": 680
+  },
+  "checkIcons": [
+    {
+      "w": 14,
+      "h": 14,
+      "fill": "none",
+      "viewBox": "0 0 24 24"
+    },
+    {
+      "w": 12,
+      "h": 12,
+      "fill": "none",
+      "viewBox": "0 0 24 24"
+    },
+    {
+      "w": 12,
+      "h": 12,
+      "fill": "none",
+      "viewBox": "0 0 24 24"
+    },
+    {
+      "w": 12,
+      "h": 12,
+      "fill": "none",
+      "viewBox": "0 0 24 24"
+    },
+    {
+      "w": 32,
+      "h": 32,
+      "fill": "none",
+      "viewBox": "0 0 24 24"
+    }
+  ],
+  "evalCards": [
+    {
+      "tag": "BUTTON",
+      "cls": "flex items-center gap-1.5 px-3 py-2 bg-gradient-to-br from-brand-700 to-brand-60",
+      "rect": {
+        "w": 88,
+        "h": 32
+      },
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "8px"
+    },
+    {
+      "tag": "DIV",
+      "cls": "flex items-center gap-1 bg-gray-100 p-1 rounded-lg",
+      "rect": {
+        "w": 373,
+        "h": 35
+      },
+      "bg": "rgb(243, 244, 246)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "8px"
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-sem",
+      "rect": {
+        "w": 119,
+        "h": 27
+      },
+      "bg": "rgb(255, 255, 255)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "6px"
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-sem",
+      "rect": {
+        "w": 119,
+        "h": 27
+      },
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "6px"
+    },
+    {
+      "tag": "BUTTON",
+      "cls": "flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-sem",
+      "rect": {
+        "w": 119,
+        "h": 27
+      },
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "6px"
+    },
+    {
+      "tag": "DIV",
+      "cls": "w-20 h-20 rounded-3xl bg-gradient-to-br from-brand-50 to-surface-50 border-2 bor",
+      "rect": {
+        "w": 80,
+        "h": 80
+      },
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "2px dashed rgb(226, 232, 240)",
+      "borderRadius": "20px"
+    },
+    {
+      "tag": "DIV",
+      "cls": "p-1.5 bg-surface-100 rounded-lg",
+      "rect": {
+        "w": 28,
+        "h": 28
+      },
+      "bg": "rgb(241, 245, 249)",
+      "border": "0px solid rgb(229, 231, 235)",
+      "borderRadius": "8px"
+    },
+    {
+      "tag": "DIV",
+      "cls": "w-16 h-16 rounded-2xl bg-gradient-to-br from-brand-50 to-surface-50 border-2 bor",
+      "rect": {
+        "w": 64,
+        "h": 64
+      },
+      "bg": "rgba(0, 0, 0, 0)",
+      "border": "2px dashed rgb(226, 232, 240)",
+      "borderRadius": "16px"
+    }
+  ],
+  "allCards": [
+    {
+      "bg": "rgba(0, 0, 0, 0)",
+      "shadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0",
+      "borderRadius": "12px"
+    },
+    {
+      "bg": "rgb(255, 255, 255)",
+      "shadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0",
+      "borderRadius": "12px"
+    },
+    {
+      "bg": "rgb(255, 255, 255)",
+      "shadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0",
+      "borderRadius": "12px"
+    },
+    {
+      "bg": "rgb(255, 255, 255)",
+      "shadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0",
+      "borderRadius": "12px"
+    },
+    {
+      "bg": "rgba(0, 0, 0, 0)",
+      "shadow": "rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0",
+      "borderRadius": "16px"
+    }
+  ]
+}

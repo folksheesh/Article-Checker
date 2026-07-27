@@ -1,4 +1,5 @@
 import { callChatCompletion } from './openai';
+import { classifyAiError, logAiError } from '../errorHandling';
 
 export interface PlagiarismResult {
   provider: 'openai' | 'none';
@@ -62,12 +63,13 @@ Bersikaplah objektif. Jika teks tampak original, beri skor rendah.`,
       explanation,
     };
   } catch (err) {
-    console.error('Plagiarism checker error:', err);
+    const info = classifyAiError(err);
+    logAiError('plagiarism', info);
     return {
       provider: 'none',
       plagiarismScore: 0,
       matchedSources: [],
-      error: err instanceof Error ? err.message : 'Gagal memeriksa plagiasi.',
+      error: info.userMessage,
     };
   }
 }

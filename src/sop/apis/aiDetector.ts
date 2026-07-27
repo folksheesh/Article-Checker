@@ -1,4 +1,5 @@
 import { callChatCompletion } from './openai';
+import { classifyAiError, logAiError } from '../errorHandling';
 
 export interface AIDetectionResult {
   provider: 'openai' | 'none';
@@ -63,12 +64,13 @@ Bersikaplah objektif.`,
       explanation,
     };
   } catch (err) {
-    console.error('AI detector error:', err);
+    const info = classifyAiError(err);
+    logAiError('ai-detector', info);
     return {
       provider: 'none',
       aiProbability: 0,
       humanProbability: 0,
-      error: err instanceof Error ? err.message : 'Gagal mendeteksi AI.',
+      error: info.userMessage,
     };
   }
 }

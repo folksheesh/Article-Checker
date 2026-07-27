@@ -23,7 +23,7 @@ export async function fetchAhrefsKeywordMetrics(
   country = AHREFS_DEFAULT_COUNTRY,
   apiKey = '',
 ): Promise<AhrefsKeywordResult> {
-  const token = (apiKey ?? '').trim() || AHREFS_API_KEY.trim();
+  const token = (apiKey ?? '').trim() || (AHREFS_API_KEY ?? '').trim();
   if (!token) {
     return { data: [], error: 'API key Ahrefs belum dikonfigurasi.' };
   }

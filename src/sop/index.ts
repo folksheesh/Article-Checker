@@ -5,6 +5,8 @@ export { calculateSopScore } from './scoring';
 export { autoReviseItem, callOllamaGenerateKeyword, callOllamaGenerateKeywords } from './autoRevise';
 export { parseArticle } from './parser';
 export { evaluateWithAI } from './aiEvaluate';
+export { splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, buildIncrementalPrompt, evaluateChangedParagraphs, parseIncrementalResponse, buildCacheKey, mergeIncrementalResults, buildInitialState, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental } from './incrementalCheck';
+export type { ParagraphBlock, ParagraphContext, IncrementalState, RecheckCacheEntry, IncrementalRecheckResult } from './incrementalCheck';
 export type { AhrefsKeywordMetric, AhrefsKeywordResult } from './apis/ahrefs';
 export { fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics } from './apis/ahrefs';
 export type { AIDetectionResult } from './apis/aiDetector';
