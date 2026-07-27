@@ -1,4 +1,5 @@
-import type { CheckResult, ArticleInput, AiEvaluationOutput, SubScores, AIDetectionResult } from './types';
+import type { CheckResult, ArticleInput, AiEvaluationOutput, SubScores, RuleId } from './types';
+import type { AIDetectionResult } from './apis/aiDetector';
 import { callChatCompletion } from './apis/openai';
 import { stripImages } from './images';
 
@@ -242,7 +243,7 @@ export function parseIncrementalResponse(
         const passed = Boolean(r.passed);
         const cat = r.category || (passed ? 'passed' : 'Error');
         allResults.push({
-          id: 1000 + pIndex * 10 + allResults.length,
+          id: (1000 + pIndex * 10 + allResults.length) as RuleId,
           question: `Pengecekan paragraf ${pIndex + 1}`,
           status: passed ? 'passed' : (cat === 'Information' ? 'info' : 'failed'),
           passed,
@@ -373,7 +374,7 @@ export function buildRecheckCacheFromAiDetector(
   const sentences = result.sentences || [];
 
   for (const p of paragraphs) {
-    const pSentences = sentences.filter((s) => p.text.includes(s.text));
+    const pSentences = sentences.filter((s: { text: string; ai_probability: number }) => p.text.includes(s.text));
     if (pSentences.length > 0) {
       aiDetectorParagraphResults[p.hash] = pSentences;
     }
@@ -388,9 +389,9 @@ export function buildRecheckCacheFromAiDetector(
 export async function runIncrementalRecheck(
   input: ArticleInput,
   currentArticle: string,
-  currentKeyword: string,
-  currentMetaTitle: string,
-  currentMetaDesc: string,
+  _currentKeyword: string,
+  _currentMetaTitle: string,
+  _currentMetaDesc: string,
   cachedEntry: RecheckCacheEntry | null,
   apiKey = '',
   signal?: AbortSignal,

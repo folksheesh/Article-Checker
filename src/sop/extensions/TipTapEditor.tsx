@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, forwardRef, useRef } from 'react';
+import { useEffect, useImperativeHandle, forwardRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
@@ -209,7 +209,7 @@ function sanitizePastedHtml(html: string): string {
 }
 
 export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialContent, onUpdate, onActiveStylesChange, onEditorClick, onEditorMouseOver, placeholder }, ref) => {
-  const highlightPlugin = new Plugin({
+  const highlightPlugin: Plugin = new Plugin({
     state: {
       init() { return DecorationSet.empty; },
       apply(tr, set) {
@@ -219,8 +219,8 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
       },
     },
     props: {
-      decorations(state) {
-        return highlightPlugin.getState(state);
+      decorations(state): DecorationSet {
+        return highlightPlugin.getState(state) as DecorationSet;
       },
     },
   });

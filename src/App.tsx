@@ -22,7 +22,6 @@ import {
   Download,
   BookOpen,
   CheckCircle2,
-  XCircle,
   X,
   AlertCircle,
   Sparkles,
@@ -51,13 +50,12 @@ import {
 } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import * as docx from 'docx';
-import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, evaluateChangedParagraphs, buildInitialState, mergeIncrementalResults, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, type IncrementalState, type ParagraphBlock, type RecheckCacheEntry, type IncrementalRecheckResult, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
+import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, evaluateChangedParagraphs, buildInitialState, mergeIncrementalResults, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, type IncrementalState, type RecheckCacheEntry, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
 import { callArticleChat } from './sop/articleChat';
 import { OPENAI_API_KEY, AHREFS_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
 import { stripImages } from './sop/images';
 import { AiErrorProvider, AiErrorFallback, useAiError } from './sop/AiErrorContext';
 import { classifyAiError, logAiError } from './sop/errorHandling';
-import type { AiFeature, AiErrorInfo } from './sop/errorHandling';
 
 type HighlightMode = 'sop' | 'ai-detector' | 'plagiarism';
 type HoverKind = 'sop' | 'ai-detector' | 'plagiarism';
@@ -483,7 +481,7 @@ function AppContent() {
   const [focusIndices, setFocusIndices] = useState<Record<number, number>>({});
   const highlightsBlockedRef = useRef(true);
 
-  const [incrementalResults, setIncrementalResults] = useState<CheckResult[]>([]);
+  const [, setIncrementalResults] = useState<CheckResult[]>([]);
   const incrementalStateRef = useRef<IncrementalState>(buildInitialState());
   const incrementalAbortRef = useRef<AbortController | null>(null);
   const incrementalDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1100,17 +1098,6 @@ function AppContent() {
 
     const mode = modeOverride ?? activeEvalTab;
     if (highlightsBlockedRef.current && mode !== 'sop') return;
-
-    // Save selection as text offset
-    const selection = window.getSelection();
-    let offsetBefore = 0;
-    if (selection && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const preRange = range.cloneRange();
-      preRange.selectNodeContents(editorEl);
-      preRange.setEnd(range.startContainer, range.startOffset);
-      offsetBefore = preRange.toString().length;
-    }
 
     const highlightedMd = htmlToMarkdown(handle.getHTML());
     type HighlightRange = {
