@@ -40,10 +40,9 @@ export async function callChatCompletion({
   temperature = 0.3,
   timeoutMs = 45_000,
   signal,
-  apiKey,
   stripJsonBlock = true,
 }: ChatCompletionOptions): Promise<ChatCompletionResult> {
-  const geminiKey = (apiKey ?? '').trim() || (GEMINI_API_KEY ?? '').trim();
+  const geminiKey = (GEMINI_API_KEY ?? '').trim();
   const openAiKey = (OPENAI_API_KEY ?? '').trim();
   const huggingfaceKey = (HUGGINGFACE_API_KEY ?? '').trim();
   const ollamaKey = (OLLAMA_API_KEY ?? '').trim();
@@ -51,33 +50,50 @@ export async function callChatCompletion({
   const openAiModel = model || OPENAI_MODEL;
   const huggingfaceModel = model || HUGGINGFACE_MODEL;
 
+  // Provider chain with automatic fallback
+  const providers: { name: string; key: string; call: () => Promise<ChatCompletionResult> }[] = [];
+
   if (ollamaKey || OLLAMA_SKIP_AUTH) {
-    console.log('[AI Model] provider=ollama model=' + OLLAMA_MODEL);
-    return callOllamaFallback({ messages, model: OLLAMA_MODEL, temperature, timeoutMs, signal, stripJsonBlock });
+    providers.push({ name: 'ollama', key: ollamaKey, call: () => callOllamaFallback({ messages, model: OLLAMA_MODEL, temperature, timeoutMs, signal, stripJsonBlock }) });
   }
 
   if (huggingfaceKey) {
-    console.log('[AI Model] provider=huggingface model=' + huggingfaceModel);
-    return callHuggingFace({ messages, model: huggingfaceModel, temperature, timeoutMs, signal, apiKey: huggingfaceKey, stripJsonBlock });
+    providers.push({ name: 'huggingface', key: huggingfaceKey, call: () => callHuggingFace({ messages, model: huggingfaceModel, temperature, timeoutMs, signal, apiKey: huggingfaceKey, stripJsonBlock }) });
   }
 
   if (geminiKey) {
-    try {
-      console.log('[AI Model] provider=gemini model=' + geminiModel);
-      return await callGemini({ messages, model: geminiModel, temperature, timeoutMs, signal, apiKey: geminiKey, stripJsonBlock });
-    } catch (err) {
-      const isQuota = err instanceof Error && /429|quota|rate.?limit/i.test(err.message);
-      if (!isQuota) throw err;
-      console.warn('Gemini quota exceeded, falling back to OpenAI:', err.message);
-    }
+    providers.push({
+      name: 'gemini', key: geminiKey, call: () => callGemini({ messages, model: geminiModel, temperature, timeoutMs, signal, apiKey: geminiKey, stripJsonBlock }),
+    });
   }
 
   if (openAiKey) {
-    console.log('[AI Model] provider=openai model=' + openAiModel);
-    return callOpenAI({ messages, model: openAiModel, temperature, timeoutMs, signal, apiKey: openAiKey, stripJsonBlock });
+    providers.push({ name: 'openai', key: openAiKey, call: () => callOpenAI({ messages, model: openAiModel, temperature, timeoutMs, signal, apiKey: openAiKey, stripJsonBlock }) });
   }
 
-  throw new Error('API key tidak tersedia. Tambahkan VITE_GEMINI_API_KEY atau VITE_OPENAI_API_KEY di .env.');
+  if (providers.length === 0) {
+    throw new Error('API key tidak tersedia. Tambahkan VITE_GEMINI_API_KEY, VITE_OPENAI_API_KEY, VITE_HUGGINGFACE_API_KEY, atau jalankan Ollama lokal.');
+  }
+
+  const errors: string[] = [];
+  for (const p of providers) {
+    try {
+      console.log(`[AI Model] provider=${p.name}`);
+      const result = await p.call();
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${p.name}: ${msg}`);
+      // For Gemini quota errors, always fall through to next provider
+      if (p.name === 'gemini' && /429|quota|rate.?limit/i.test(msg)) {
+        console.warn(`Gemini quota exceeded, falling back to next provider: ${msg}`);
+        continue;
+      }
+      console.warn(`${p.name} failed, falling back to next provider: ${msg}`);
+    }
+  }
+
+  throw new Error(`Semua provider AI gagal.\n${errors.join('\n')}`);
 }
 
 async function callGemini({

@@ -38,7 +38,7 @@ function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
   };
 }
 
-export async function evaluateWithAI(input: AiEvaluationInput, apiKey = '', signal?: AbortSignal): Promise<AiEvaluationOutput> {
+export async function evaluateWithAI(input: AiEvaluationInput, signal?: AbortSignal): Promise<AiEvaluationOutput> {
   const systemPrompt = `Anda adalah Editor Senior dan Ahli Hukum Konten Digital Indonesia.
 Tugas Anda mengevaluasi artikel hukum berdasarkan SOP dan aturan berikut. Keluarkan hasil HANYA dalam format JSON.
 
@@ -194,7 +194,6 @@ ${truncatedArticle}`;
       temperature: 0.2,
       timeoutMs: AI_EVAL_TIMEOUT_MS,
       signal,
-      apiKey,
     });
 
     const parsed = JSON.parse(content);

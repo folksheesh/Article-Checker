@@ -1845,7 +1845,6 @@ Pertimbangkan topik utama artikel, intent pencarian, variasi long-tail, dan sino
           metaTitle: stripImages(metaTitle),
           metaDesc: stripImages(metaDesc),
         },
-        OPENAI_API_KEY,
         signal,
       )
         .then((output) => {
