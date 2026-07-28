@@ -355,6 +355,12 @@ function applyDeterministicFix(
 
 const AI_REWRITE_IDS: RuleId[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 20];
 
+function normalizeWhitespace(text: string): string {
+  return text
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{4,}/g, '\n\n\n');
+}
+
 async function callAIRewrite(
   apiKey: string,
   input: ArticleInput,
@@ -387,6 +393,7 @@ ATURAN PERBAIKAN:
 - Perubahan minimal dan presisi.
 - Jangan memvalidasi klaim hukum — hanya perbaiki format/tata tulis.
 - Artikel mengandung token gambar [[GAMBAR_0]], [[GAMBAR_1]], dst. PERTAHANKAN token-token tersebut persis di posisi aslinya dalam output. Jangan ubah, jangan hapus, dan jangan ganti formatnya.
+- PERTAHANKAN PERSIS format asli artikel: jangan tambah baris kosong, jangan hapus baris kosong, jangan ubah jumlah spasi antar paragraf, jangan ubah indentasi.
 
 Batas SOP:
 - Judul: max ${MAX_TITLE_CHARS} karakter, mengandung keyword jika relevan
@@ -416,7 +423,7 @@ Kembalikan JSON:
   });
 
   const parsed = JSON.parse(content);
-  let outArticle = typeof parsed.article === 'string' ? parsed.article : input.article;
+  let outArticle = typeof parsed.article === 'string' ? normalizeWhitespace(parsed.article) : normalizeWhitespace(input.article);
   // Sanitize AI response: convert any raw HTML <a> tags to markdown link syntax
   // The AI is asked to return markdown but may return HTML — this prevents
   // <a> tags from being HTML-escaped and displayed as raw text.

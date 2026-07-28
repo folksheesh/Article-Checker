@@ -163,7 +163,7 @@ export const STRONG_TITLE_WORDS = [
 
 export const MIN_KEYWORD_DENSITY = 0.5;
 export const MAX_KEYWORD_DENSITY = 2.5;
-export const MAX_SENTENCE_WORDS = 30;
+export const MAX_SENTENCE_WORDS = 35;
 export const MAX_PARAGRAPH_WORDS = 60;
 
 

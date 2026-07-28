@@ -49,6 +49,12 @@ export interface TipTapEditorHandle {
   clearDecorations: () => void;
   /** Returns the ProseMirror document for text searching (read-only). */
   getDoc: () => any;
+  /**
+   * Replace exact oldText with newText in the editor content.
+   * Uses ProseMirror range API — no full setContent.
+   * Returns true if text was found and replaced.
+   */
+  replaceText: (oldText: string, newText: string) => boolean;
 }
 
 interface Props {
@@ -272,6 +278,12 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
       attributes: {
         class: 'editor-surface w-full h-full outline-none text-[15px] leading-relaxed text-surface-800',
       },
+      handleKeyDown: (_view, event) => {
+        if ((event.ctrlKey || event.metaKey) && (event.key === 'z' || event.key === 'y')) {
+          return true;
+        }
+        return false;
+      },
       handleDOMEvents: {
         mouseover: (_view, event) => {
           if (onEditorMouseOver) {
@@ -371,6 +383,34 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
       editor.view.dispatch(editor.state.tr.setMeta('highlightDecorations', DecorationSet.empty));
     },
     getDoc: () => editor?.state.doc ?? null,
+    replaceText: (oldText: string, newText: string): boolean => {
+      if (!editor) return false;
+      const doc = editor.state.doc;
+      let from = -1;
+      let to = -1;
+      doc.forEach((blockNode, blockOffset) => {
+        if (from !== -1) return false;
+        if (!blockNode.isTextblock) return;
+        const blockText = blockNode.textContent;
+        const idx = blockText.indexOf(oldText);
+        if (idx === -1) return;
+        let accumulated = 0;
+        blockNode.forEach((child, childOffset) => {
+          if (from !== -1 || !child.isText) return;
+          const childText = child.text || '';
+          const childLen = childText.length;
+          if (idx >= accumulated && idx < accumulated + childLen) {
+            const localIdx = idx - accumulated;
+            from = blockOffset + 1 + childOffset + localIdx;
+            to = from + oldText.length;
+          }
+          accumulated += childLen;
+        });
+      });
+      if (from === -1) return false;
+      editor.chain().focus().insertContentAt({ from, to }, newText).run();
+      return true;
+    },
   }), [editor]);
 
   useEffect(() => {

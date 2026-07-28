@@ -78,7 +78,11 @@ export async function callChatCompletion({
   const errors: string[] = [];
   for (const p of providers) {
     try {
-      console.log(`[AI Model] provider=${p.name}`);
+      if (p.name === 'gemini') {
+        console.log(`[AI Model] provider=gemini model=${geminiModel}`);
+      } else {
+        console.log(`[AI Model] provider=${p.name}`);
+      }
       const result = await p.call();
       return result;
     } catch (err) {
@@ -130,6 +134,7 @@ async function callGemini({
   }
 
   try {
+    console.log(`[Gemini Request] model=${model} baseUrl=${GEMINI_BASE_URL}`);
     const url = `${GEMINI_BASE_URL}/models/${model}:generateContent?key=${encodeURIComponent(apiKey!)}`;
     const response = await fetch(url, {
       method: 'POST',
@@ -280,7 +285,10 @@ async function callOllamaFallback({
   }
 
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
+    const url = import.meta.env.DEV
+      ? `${OLLAMA_BASE_URL}/v1/chat/completions`
+      : '/ollama-proxy.php';
+    const response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({

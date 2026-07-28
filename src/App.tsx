@@ -50,7 +50,7 @@ import {
 } from 'lucide-react';
 import html2pdf from 'html2pdf.js';
 import * as docx from 'docx';
-import { runSopChecks, evaluateWithAI, autoReviseItem, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, evaluateChangedParagraphs, buildInitialState, mergeIncrementalResults, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, type IncrementalState, type RecheckCacheEntry, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
+import { runSopChecks, evaluateWithAI, getPrimaryKeyword, detectAIContent, checkPlagiarism, fetchAhrefsKeywordMetrics, generateMockAhrefsMetrics, callChatCompletion, calculateSopScore, splitIntoParagraphs, detectChangedParagraphs, getParagraphContext, evaluateChangedParagraphs, buildInitialState, mergeIncrementalResults, computeArticleHash, buildRecheckCacheFromFullResults, buildRecheckCacheFromAiDetector, runIncrementalRecheck, mergeAiDetectorIncremental, type CheckResult, type SopReport, type AiEvaluationOutput, type AIDetectionResult, type PlagiarismResult, type AhrefsKeywordMetric, type IncrementalState, type RecheckCacheEntry, TipTapEditor, type ActiveStyleState, type TipTapEditorHandle, computeEvaluationAccuracy, type EvaluationAccuracy, getAccuracyBadgeClasses, getAccuracyBarColor } from './sop';
 import { callArticleChat } from './sop/articleChat';
 import { OPENAI_API_KEY, AHREFS_API_KEY, UNDO_STACK_LIMIT } from './sop/config';
 import { stripImages } from './sop/images';
@@ -127,7 +127,7 @@ function markdownToHtml(md: string): string {
     const parts = meta.trim().split(/\s+/).filter(Boolean);
     const width = /^\d+$/.test(parts[0] || '') ? parts[0] : '';
     const align = (parts[1] || 'inline').toLowerCase();
-    let attrs = `src="${src}" alt="${alt}"`;
+    let attrs = `src="${src}" alt="${alt}" title="${meta}"`;
     if (width) attrs += ` width="${width}"`;
     attrs += ` data-align="${align}"`;
     const baseStyle = 'max-width:100%;border-radius:8px;';
@@ -189,7 +189,9 @@ function markdownToHtml(md: string): string {
         inList = null;
       }
       if (trimmed === '') {
-        out.push('<br />');
+        out.push('<p><br></p>');
+      } else if (/^<h[1-4]/.test(trimmed) || /^<blockquote/.test(trimmed)) {
+        out.push(line);
       } else {
         out.push(`<p>${line}</p>`);
       }
@@ -273,12 +275,16 @@ function htmlToMarkdown(html: string): string {
       case 'img':
         const src = el.getAttribute('src') || '';
         const alt = el.getAttribute('alt') || '';
+        const title = el.getAttribute('title') || '';
         const w = el.getAttribute('width') || el.style.width;
         const align = (el.getAttribute('data-align') || 'inline').toLowerCase();
+        if (title) {
+          return `![${alt}](${src} "${title}")\n`;
+        }
         const wNum = w ? String(w).replace('px', '') : '';
-        let title = wNum;
-        if (align !== 'inline') title += (title ? ' ' : '') + align;
-        return title ? `![${alt}](${src} "${title}")\n` : `![${alt}](${src})\n`;
+        let meta = wNum;
+        if (align !== 'inline') meta += (meta ? ' ' : '') + align;
+        return meta ? `![${alt}](${src} "${meta}")\n` : `![${alt}](${src})\n`;
       case 'mark':
         return children;
       default:
@@ -315,16 +321,59 @@ function findTextMatch(text: string, query: string): { start: number; end: numbe
 }
 
 function extractActualCorrection(suggestedFix: string): string {
-  // Try to extract the actual word from AI response like "Ubah 'X' menjadi 'Y'."
-  const menjadiMatch = suggestedFix.match(/menjadi\s+'([^']+)'/i);
-  if (menjadiMatch) return menjadiMatch[1];
-  const menjadiMatch2 = suggestedFix.match(/menjadi\s+"([^"]+)"/i);
-  if (menjadiMatch2) return menjadiMatch2[1];
-  const toMatch = suggestedFix.match(/(?:to|into|with)\s+'([^']+)'/i);
-  if (toMatch) return toMatch[1];
-  const toMatch2 = suggestedFix.match(/(?:to|into|with)\s+"([^"]+)"/i);
-  if (toMatch2) return toMatch2[1];
-  return suggestedFix;
+  const patterns = [
+    /dengan\s+'([^']+)'/i,
+    /dengan\s+"([^"]+)"/i,
+    /menjadi\s+'([^']+)'/i,
+    /menjadi\s+"([^"]+)"/i,
+    /seperti\s+'([^']+)'/i,
+    /seperti\s+"([^"]+)"/i,
+    /menggunakan\s+'([^']+)'/i,
+    /menggunakan\s+"([^"]+)"/i,
+    /(?:to|into|with)\s+'([^']+)'/i,
+    /(?:to|into|with)\s+"([^"]+)"/i,
+  ];
+  for (const p of patterns) {
+    const m = suggestedFix.match(p);
+    if (m) return m[1];
+  }
+  const allQuoted = suggestedFix.match(/'([^']+)'/g);
+  if (allQuoted && allQuoted.length >= 2) {
+    const last = allQuoted[allQuoted.length - 1];
+    return last.replace(/^'|'$/g, '');
+  }
+  const words = suggestedFix.split(/\s+/).filter((w) => w.length > 2);
+  return words[words.length - 1] || suggestedFix;
+}
+
+interface Correction {
+  original_text: string;
+  corrected_text: string;
+  reason?: string;
+}
+
+function applyCorrectionsToArticle(article: string, corrections: Correction[]): { result: string; applied: number; skipped: number } {
+  let result = article;
+  let applied = 0;
+  let skipped = 0;
+  for (const c of corrections) {
+    const orig = c.original_text.trim();
+    if (!orig) { skipped++; continue; }
+    const firstTry = result.indexOf(orig);
+    if (firstTry !== -1) {
+      result = result.slice(0, firstTry) + c.corrected_text + result.slice(firstTry + orig.length);
+      applied++;
+      continue;
+    }
+    const fuzzy = findTextMatch(result, orig);
+    if (fuzzy) {
+      result = result.slice(0, fuzzy.start) + c.corrected_text + result.slice(fuzzy.end);
+      applied++;
+      continue;
+    }
+    skipped++;
+  }
+  return { result, applied, skipped };
 }
 
 function findTextMatchAfter(text: string, query: string, from: number): { start: number; end: number } | null {
@@ -503,55 +552,48 @@ function AppContent() {
   const analysisAbortRef = useRef<AbortController | null>(null);
   const recheckCacheRef = useRef<RecheckCacheEntry | null>(null);
   const isUpdatingFromCodeRef = useRef(false);
-  const undoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
-  const redoStackRef = useRef<{ article: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
+  const undoStackRef = useRef<{ html: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
+  const redoStackRef = useRef<{ html: string; keyword: string; metaTitle: string; metaDesc: string }[]>([]);
   const checkingRef = useRef(false);
   const lastUndoRef = useRef(0);
+  const prevHtmlRef = useRef('');
 
   const pushUndo = () => {
-    undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
+    const html = editorRef.current?.getHTML() || markdownToHtml(article);
+    undoStackRef.current.push({ html, keyword, metaTitle, metaDesc });
     if (undoStackRef.current.length > UNDO_STACK_LIMIT) undoStackRef.current.shift();
     redoStackRef.current = [];
+  };
+
+  const restoreState = (cur: { html: string; keyword: string; metaTitle: string; metaDesc: string }) => {
+    setHover(null);
+    setKeyword(cur.keyword);
+    setMetaTitle(cur.metaTitle);
+    setMetaDesc(cur.metaDesc);
+    const md = htmlToMarkdown(cur.html);
+    setArticle(md);
+    isUpdatingFromCodeRef.current = true;
+    editorRef.current?.setContent(cur.html);
+    isUpdatingFromCodeRef.current = false;
+    prevHtmlRef.current = cur.html;
+    const restored = runSopChecks({ article: md, keyword: cur.keyword, metaTitle: cur.metaTitle, metaDesc: cur.metaDesc });
+    setLiveReport(restored);
+    setReport(restored);
+    requestAnimationFrame(() => applyHighlights(restored));
   };
 
   const handleUndo = () => {
     const cur = undoStackRef.current.pop();
     if (!cur) return;
-    redoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
-    setHover(null);
-    setKeyword(cur.keyword);
-    setMetaTitle(cur.metaTitle);
-    setMetaDesc(cur.metaDesc);
-    setArticleFromMarkdown(cur.article);
-    const restored = runSopChecks({
-      article: cur.article,
-      keyword: cur.keyword,
-      metaTitle: cur.metaTitle,
-      metaDesc: cur.metaDesc,
-    });
-    setLiveReport(restored);
-    setReport(restored);
-    requestAnimationFrame(() => applyHighlights(restored));
+    redoStackRef.current.push({ html: editorRef.current?.getHTML() || markdownToHtml(article), keyword, metaTitle, metaDesc });
+    restoreState(cur);
   };
 
   const handleRedo = () => {
     const cur = redoStackRef.current.pop();
     if (!cur) return;
-    undoStackRef.current.push({ article, keyword, metaTitle, metaDesc });
-    setHover(null);
-    setKeyword(cur.keyword);
-    setMetaTitle(cur.metaTitle);
-    setMetaDesc(cur.metaDesc);
-    setArticleFromMarkdown(cur.article);
-    const restored = runSopChecks({
-      article: cur.article,
-      keyword: cur.keyword,
-      metaTitle: cur.metaTitle,
-      metaDesc: cur.metaDesc,
-    });
-    setLiveReport(restored);
-    setReport(restored);
-    requestAnimationFrame(() => applyHighlights(restored));
+    undoStackRef.current.push({ html: editorRef.current?.getHTML() || markdownToHtml(article), keyword, metaTitle, metaDesc });
+    restoreState(cur);
   };
 
   const handleUndoRef = useRef(handleUndo);
@@ -741,10 +783,11 @@ function AppContent() {
     requestAnimationFrame(() => applyHighlights(undefined, 'plagiarism'));
   }, [plagiarismResult, activeEvalTab, hasChecked]);
 
-  // Compute evaluation accuracy whenever results change
+  // Compute evaluation accuracy only after user has clicked "Periksa"
   useEffect(() => {
+    if (!hasChecked) { setEvaluationAccuracy(null); return; }
     setEvaluationAccuracy(computeEvaluationAccuracy(aiResults, aiDetectorResult, plagiarismResult));
-  }, [aiResults, aiDetectorResult, plagiarismResult]);
+  }, [aiResults, aiDetectorResult, plagiarismResult, hasChecked]);
 
   // Load saved draft on mount
   useEffect(() => {
@@ -752,7 +795,15 @@ function AppContent() {
       const saved = localStorage.getItem(DRAFT_KEY);
       if (saved) {
         const data = JSON.parse(saved);
-        if (typeof data.article === 'string') setArticleFromMarkdown(data.article);
+        if (typeof data.htmlContent === 'string') {
+          setArticle(data.article);
+          setHtmlContent(data.htmlContent);
+          isUpdatingFromCodeRef.current = true;
+          editorRef.current?.setContent(data.htmlContent);
+          setTimeout(() => { isUpdatingFromCodeRef.current = false; }, 0);
+        } else if (typeof data.article === 'string') {
+          setArticleFromMarkdown(data.article);
+        }
         if (typeof data.keyword === 'string') setKeyword(data.keyword);
         if (typeof data.metaTitle === 'string') setMetaTitle(data.metaTitle);
         if (typeof data.metaDesc === 'string') setMetaDesc(data.metaDesc);
@@ -771,6 +822,7 @@ function AppContent() {
       try {
         localStorage.setItem(DRAFT_KEY, JSON.stringify({
           article,
+          htmlContent,
           keyword,
           metaTitle,
           metaDesc,
@@ -904,7 +956,13 @@ function AppContent() {
     setHtmlContent(html);
     isUpdatingFromCodeRef.current = true;
     editorRef.current?.setContent(html);
-    setTimeout(() => { isUpdatingFromCodeRef.current = false; }, 0);
+    prevHtmlRef.current = html;
+    setTimeout(() => {
+      isUpdatingFromCodeRef.current = false;
+      if (editorRef.current) {
+        setHtmlContent(editorRef.current.getHTML());
+      }
+    }, 0);
   };
 
   const onTipTapUpdate = (html: string) => {
@@ -914,8 +972,14 @@ function AppContent() {
     const now = Date.now();
     if (now - lastUndoRef.current > 400) {
       lastUndoRef.current = now;
-      pushUndo();
+      // Save the HTML that was current BEFORE this change
+      if (prevHtmlRef.current) {
+        undoStackRef.current.push({ html: prevHtmlRef.current, keyword, metaTitle, metaDesc });
+        if (undoStackRef.current.length > UNDO_STACK_LIMIT) undoStackRef.current.shift();
+        redoStackRef.current = [];
+      }
     }
+    prevHtmlRef.current = html;
   };
 
   const toolbarToggleClass = (active: boolean) =>
@@ -1489,7 +1553,10 @@ function AppContent() {
       }
       const nextArticle = article.slice(0, m.start) + rewritten + article.slice(m.end);
       pushUndo();
-      setArticleFromMarkdown(nextArticle);
+      setArticle(nextArticle);
+      isUpdatingFromCodeRef.current = true;
+      editorRef.current?.replaceText(snippet, rewritten);
+      isUpdatingFromCodeRef.current = false;
       const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
@@ -1535,10 +1602,51 @@ const handleAutoCorrect = async (item: CheckResult) => {
           setTimeout(() => setFlashText(''), 3000);
           return;
         }
-        const correction = extractActualCorrection(suggestedFix);
-        const newArticle = article.slice(0, m.start) + correction + article.slice(m.end);
 
-        setArticleFromMarkdown(newArticle);
+        let correction = extractActualCorrection(suggestedFix);
+        // If the extracted correction is still a generic phrase (not a clean word),
+        // or if the word is very short (weak word), use AI with sentence context
+        if ((correction.length > 20 || targetWord.length < 8) && item.target_highlight?.sentence_context) {
+          try {
+            const { content } = await callChatCompletion({
+              messages: [
+                {
+                  role: 'system',
+                  content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Ganti SATU kata lemah "${targetWord}" dalam kalimat di bawah dengan kata yang lebih tepat dan kuat sesuai KONTEKS kalimat.
+${item.suggested_fix ? `\nPanduan perbaikan: ${item.suggested_fix}` : ''}
+
+Aturan:
+- HANYA ganti kata "${targetWord}" — jangan ubah kata lain dalam kalimat.
+- Pilih pengganti yang SESUAI KONTEKS kalimat. Jangan paksa ganti jika tidak ada padanan yang tepat.
+- Jika "${targetWord}" sudah tepat dalam konteks ini (misal: "hanya...yang..." dalam struktur kalimat), atau memang tidak ada pengganti yang lebih baik, kembalikan kata aslinya "${targetWord}".
+- Kembalikan JSON: { "replacement": "..." }`,
+                },
+                { role: 'user', content: item.target_highlight.sentence_context },
+              ],
+              temperature: 0.2,
+              timeoutMs: 15000,
+            });
+            const parsed = JSON.parse(content);
+            if (parsed?.replacement && typeof parsed.replacement === 'string') {
+              correction = parsed.replacement.trim();
+            }
+          } catch {
+            // Fall through to use the extracted correction
+          }
+        }
+
+        if (correction === targetWord) {
+          setFlashText(`"${targetWord}" sudah tepat dalam konteks ini.`);
+          setTimeout(() => setFlashText(''), 3000);
+          return;
+        }
+
+        const newArticle = article.slice(0, m.start) + correction + article.slice(m.end);
+        setArticle(newArticle);
+        isUpdatingFromCodeRef.current = true;
+        editorRef.current?.replaceText(targetWord, correction);
+        isUpdatingFromCodeRef.current = false;
         setHover(null);
         const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
         setLiveReport(newReport);
@@ -1549,46 +1657,145 @@ const handleAutoCorrect = async (item: CheckResult) => {
         return;
       }
 
-      // For other cases (adding CTA, references, etc.), use AI-based approach
-      const systemPrompt = `Anda adalah asisten Auto-Correct Editor Konten Hukum.
-Tugas Anda memperbaiki SATU kriteria spesifik berikut.
-
-Kriteria: "${item.question}"
-Alasan: "${item.reason}"
-
-${item.suggested_fix ? `Saran perbaikan: ${item.suggested_fix}` : ''}
-
-ATURAN:
-- Jika ini adalah koreksi typo, ganti kata yang salah dengan saran perbaikan langsung dalam teks.
-- Jika ini adalah penambahan konten (CTA, referensi, dll), tambahkan konten yang diperlukan di akhir artikel.
-- Jangan ubah teks yang tidak perlu diubah.
-- Kembalikan artikel lengkap dengan perubahan yang dilakukan.
-
-Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
-
-      const userPrompt = `Keyword: ${keyword || '-'}\nMeta Title: ${metaTitle || '-'}\nMeta Desc: ${metaDesc || '-'}\n\nARTIKEL:\n${article}`;
+      // For other cases, use AI to detect corrections as a structured list
+      let textToFix = (item.problematic_text || '').trim();
+      // If textToFix is too short (e.g., single weak word), use sentence_context instead
+      if (textToFix.length <= 5 && item.target_highlight?.sentence_context) {
+        textToFix = item.target_highlight.sentence_context.trim();
+      }
+      const hasMatchableText = textToFix.length > 5;
+      let articleContext = '';
+      if (hasMatchableText) {
+        const m = findTextMatch(article, textToFix);
+        if (m) {
+          articleContext = article.slice(Math.max(0, m.start - 200), m.end + 200);
+        }
+      }
 
       const { content } = await callChatCompletion({
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
+          {
+            role: 'system',
+            content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Deteksi dan koreksi SATU kriteria spesifik pada teks artikel berikut.
+
+Kriteria: "${item.question}"
+Alasan: "${item.reason}"
+${item.suggested_fix ? `Saran perbaikan: ${item.suggested_fix}` : ''}
+
+Tugas Anda: Kembalikan daftar koreksi dalam bentuk JSON array.
+Setiap item dalam array berisi:
+- "original_text": teks asli yang salah, KUTIPAN VERBATIM PERSIS dari artikel (wajib sama persis, termasuk spasi, huruf besar/kecil, tanda baca)
+- "corrected_text": teks hasil koreksi
+- "reason": alasan singkat koreksi
+
+Aturan:
+- original_text HARUS KUTIPAN VERBATIM PERSIS dari artikel. Jangan diparafrase.
+- Jika tidak ada yang perlu dikoreksi, kembalikan array kosong [].
+- JANGAN mengembalikan artikel lengkap. HANYA array koreksi.
+- Koreksi minimal, hanya bagian yang bermasalah.
+${articleContext ? `\nKonteks artikel (200 karakter sebelum & sesudah teks bermasalah):\n"${articleContext}"` : ''}
+
+Kembalikan JSON: [ { "original_text": "...", "corrected_text": "...", "reason": "..." } ]`,
+          },
+          {
+            role: 'user',
+            content: `Teks yang perlu diperiksa:\n"${textToFix}"`,
+          },
         ],
         temperature: 0.2,
         timeoutMs: 30000,
-        apiKey: OPENAI_API_KEY,
       });
 
-      const parsed = JSON.parse(content);
-      const newArticle = typeof parsed.article === 'string' ? parsed.article : article;
-      setArticleFromMarkdown(newArticle);
-      if (typeof parsed.metaTitle === 'string') setMetaTitle(parsed.metaTitle);
-      if (typeof parsed.metaDesc === 'string') setMetaDesc(parsed.metaDesc);
+      let corrections: Correction[] = [];
+      try { corrections = JSON.parse(content); } catch { corrections = []; }
+      if (!Array.isArray(corrections)) corrections = [];
+      corrections = corrections.filter((c) => c.original_text && c.corrected_text);
+
+      if (corrections.length === 0) {
+        if (hasMatchableText && textToFix.length > 3) {
+          // Fallback: no corrections found, try content addition approach
+          const { content: fallbackContent } = await callChatCompletion({
+            messages: [
+              {
+                role: 'system',
+                content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Buat konten tambahan untuk artikel berdasarkan kriteria berikut.
+
+Kriteria: "${item.question}"
+Alasan: "${item.reason}"
+${item.suggested_fix ? `Saran perbaikan: ${item.suggested_fix}` : ''}
+
+ATURAN:
+- Buat konten yang diperlukan (CTA, referensi, paragraf, dll) dalam format markdown.
+- Maksimal 3 kalimat.
+- Jika ini perbaikan meta, perbaiki meta title/description (jangan buat konten artikel).
+- Gunakan bahasa Indonesia formal-natural.
+- Kembalikan JSON: { "content": "...", "metaTitle": "...", "metaDesc": "..." }`,
+              },
+              {
+                role: 'user',
+                content: `Keyword: ${keyword || '-'}\nMeta Title: ${metaTitle || '-'}\nMeta Desc: ${metaDesc || '-'}`,
+              },
+            ],
+            temperature: 0.3,
+            timeoutMs: 30000,
+          });
+
+          const parsed = JSON.parse(fallbackContent);
+          const addition = typeof parsed.content === 'string' ? parsed.content.trim() : '';
+          if (addition) {
+            const addedArticle = article.trimEnd() + '\n\n' + addition;
+            setArticle(addedArticle);
+            if (editorRef.current) {
+              const additionHtml = markdownToHtml(addition);
+              editorRef.current.setContent(editorRef.current.getHTML() + additionHtml);
+            }
+            if (typeof parsed.metaTitle === 'string') setMetaTitle(parsed.metaTitle);
+            if (typeof parsed.metaDesc === 'string') setMetaDesc(parsed.metaDesc);
+          }
+          setFlashText('Auto Correct selesai (tambahan konten).');
+          setTimeout(() => setFlashText(''), 3000);
+        } else {
+          setFlashText('Auto Correct tidak menemukan koreksi.');
+          setTimeout(() => setFlashText(''), 3000);
+        }
+        setHover(null);
+        const finalReport = runSopChecks({ article, keyword, metaTitle, metaDesc });
+        setLiveReport(finalReport);
+        setReport(finalReport);
+        requestAnimationFrame(() => applyHighlights(finalReport));
+        return;
+      }
+
+      // Apply corrections via index-based string replace
+      const { result: newArticle, applied, skipped } = applyCorrectionsToArticle(article, corrections);
+      if (applied === 0) {
+        setFlashText('Teks asli tidak ditemukan persis di artikel — koreksi dilewati.');
+        setTimeout(() => setFlashText(''), 3000);
+        return;
+      }
+
+      setArticle(newArticle);
+      // Apply to TipTap editor via surgical range replace (no setContent)
+      isUpdatingFromCodeRef.current = true;
+      if (editorRef.current) {
+        for (const c of corrections) {
+          if (!editorRef.current.replaceText(c.original_text, c.corrected_text)) {
+            // Fallback: try with whitespace-normalized text
+            const normOld = c.original_text.replace(/\s+/g, ' ');
+            const normNew = c.corrected_text.replace(/\s+/g, ' ');
+            editorRef.current.replaceText(normOld, normNew);
+          }
+        }
+      }
+      isUpdatingFromCodeRef.current = false;
       setHover(null);
-      const newReport = runSopChecks({ article: newArticle, keyword, metaTitle: typeof parsed.metaTitle === 'string' ? parsed.metaTitle : metaTitle, metaDesc: typeof parsed.metaDesc === 'string' ? parsed.metaDesc : metaDesc });
+      const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
       requestAnimationFrame(() => applyHighlights(newReport));
-      setFlashText('Auto Correct berhasil.');
+      setFlashText(`Auto Correct berhasil (${applied} koreksi, ${skipped} dilewati).`);
       setTimeout(() => setFlashText(''), 3000);
     } catch (err: unknown) {
       const info = classifyAiError(err);
@@ -1600,38 +1807,67 @@ Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
     return;
   }
 
-  try {
-    const result = await autoReviseItem(
-      { article, keyword, metaTitle, metaDesc },
-      item,
-      OPENAI_API_KEY,
-    );
-    const updatedKeyword = result.keyword || keyword;
-    const updatedTitle = result.metaTitle || metaTitle;
-    const updatedDesc = result.metaDesc || metaDesc;
-    setArticleFromMarkdown(result.article);
-    if (result.keyword) setKeyword(result.keyword);
-    if (result.metaTitle) setMetaTitle(result.metaTitle);
-    if (result.metaDesc) setMetaDesc(result.metaDesc);
-    setHover(null);
-    // Re-check and re-apply highlights immediately with the corrected content
-    const newReport = runSopChecks({
-      article: result.article,
-      keyword: updatedKeyword,
-      metaTitle: updatedTitle,
-      metaDesc: updatedDesc,
-    });
-    setLiveReport(newReport);
-    setReport(newReport);
-    requestAnimationFrame(() => applyHighlights(newReport));
-  } catch (err: unknown) {
-    setHover(null);
-    const info = classifyAiError(err);
-    logAiError('auto-correct', info);
-    setError('auto-correct', info);
-  } finally {
-    setFixingId(null);
+  // For items that don't have the new-style flags, still try the corrections approach
+  const textToFixLegacy = (item.problematic_text || item.question || '').trim();
+  if (textToFixLegacy.length > 10) {
+    try {
+      const { content } = await callChatCompletion({
+        messages: [
+          {
+            role: 'system',
+            content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Deteksi dan koreksi teks berikut.
+
+Kriteria: "${item.question || '-'}"
+Alasan: "${item.reason || '-'}"
+${item.suggested_fix ? `Saran perbaikan: ${item.suggested_fix}` : ''}
+
+Kembalikan JSON array koreksi:
+[ { "original_text": "...", "corrected_text": "...", "reason": "..." } ]
+
+- original_text HARUS kutipan verbatim dari teks yang diberikan
+- JANGAN mengembalikan artikel lengkap`,
+          },
+          { role: 'user', content: textToFixLegacy },
+        ],
+        temperature: 0.2,
+        timeoutMs: 30000,
+      });
+
+      let corrections: Correction[] = [];
+      try { corrections = JSON.parse(content); } catch { corrections = []; }
+      if (!Array.isArray(corrections)) corrections = [];
+      corrections = corrections.filter((c) => c.original_text && c.corrected_text);
+
+      if (corrections.length > 0) {
+        const { result: newArticle, applied } = applyCorrectionsToArticle(article, corrections);
+        if (applied > 0) {
+          setArticle(newArticle);
+          isUpdatingFromCodeRef.current = true;
+          if (editorRef.current) {
+            for (const c of corrections) {
+              editorRef.current.replaceText(c.original_text, c.corrected_text);
+            }
+          }
+          isUpdatingFromCodeRef.current = false;
+          setHover(null);
+          const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
+          setLiveReport(newReport);
+          setReport(newReport);
+          requestAnimationFrame(() => applyHighlights(newReport));
+          setFlashText('Auto Correct berhasil.');
+          setTimeout(() => setFlashText(''), 3000);
+          return;
+        }
+      }
+    } catch {
+      // Fall through to message below
+    }
   }
+
+  setFlashText('Auto Correct tidak tersedia untuk item ini.');
+  setTimeout(() => setFlashText(''), 3000);
+  setHover(null);
 };
 
   const handleAutoCorrectCase = (item: CheckResult) => {
@@ -1651,7 +1887,10 @@ Kembalikan JSON: { "article": "...", "metaTitle": "...", "metaDesc": "..." }`;
     if (corrected === text) return;
 
     const newMd = md.slice(0, m.start) + corrected + md.slice(m.end);
-    setArticleFromMarkdown(newMd);
+    setArticle(newMd);
+    isUpdatingFromCodeRef.current = true;
+    editorRef.current?.replaceText(text, corrected);
+    isUpdatingFromCodeRef.current = false;
     setHover(null);
     const newReport = runSopChecks({ article: newMd, keyword, metaTitle, metaDesc });
     setLiveReport(newReport);
@@ -1710,11 +1949,12 @@ Kembalikan JSON SAJA: { "metaDescription": "..." }`,
     try {
       if (source === 'ai') {
         if (!article.trim()) {
-          setKwGenError('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');
+          setKwGenError('Tidak ada artikel untuk dianalisis. Tulis artikel terlebih dahulu.');
           setKwGenLoading(false);
           return;
         }
-        const { content } = await callChatCompletion({
+
+      const { content } = await callChatCompletion({
           messages: [
             {
               role: 'system',
@@ -2087,11 +2327,13 @@ Kembalikan JSON SAJA: { "rewritten": "..." }`;
     try {
       let nextArticle = article;
       let fixedCount = 0;
+      const changes: { oldText: string; newText: string }[] = [];
       for (const sentence of candidates) {
         const m = findTextMatch(nextArticle, sentence.text);
         if (!m) continue;
         const rewritten = await rewriteSnippet(nextArticle.slice(m.start, m.end), 'ai');
         if (!rewritten || rewritten.toLowerCase() === nextArticle.slice(m.start, m.end).trim().toLowerCase()) continue;
+        changes.push({ oldText: nextArticle.slice(m.start, m.end), newText: rewritten });
         nextArticle = nextArticle.slice(0, m.start) + rewritten + nextArticle.slice(m.end);
         fixedCount += 1;
       }
@@ -2103,7 +2345,14 @@ Kembalikan JSON SAJA: { "rewritten": "..." }`;
       }
 
       pushUndo();
-      setArticleFromMarkdown(nextArticle);
+      setArticle(nextArticle);
+      isUpdatingFromCodeRef.current = true;
+      if (editorRef.current) {
+        for (const c of changes) {
+          editorRef.current.replaceText(c.oldText, c.newText);
+        }
+      }
+      isUpdatingFromCodeRef.current = false;
       const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
@@ -2154,6 +2403,7 @@ Kembalikan JSON SAJA: { "rewritten": "..." }`;
 
       pushUndo();
       setArticleFromMarkdown(nextArticle);
+      setHover(null);
       const newReport = runSopChecks({ article: nextArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
@@ -2601,8 +2851,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
       {/* Header */}
       <header id="app-header" className="article-checker-header h-[64px] bg-white/90 backdrop-blur-xl border-b border-surface-200 shadow-sm flex items-center justify-between px-6 shrink-0 sticky top-0 z-30 transition-all duration-300">
         <div id="header-brand" className="header-brand-group flex items-center gap-3 group cursor-default">
-          <div className="header-logo bg-gradient-to-br from-brand-700 to-brand-500 text-white p-2.5 rounded-xl shadow-sm shadow-brand-700/30 transition-all duration-300 group-hover:shadow-md group-hover:scale-105 group-hover:rotate-3">
-            <Scale className="w-5 h-5 transition-transform duration-500 group-hover:animate-gentle-pulse" />
+          <div className="header-logo bg-gradient-to-br from-brand-700 to-brand-500 text-white p-2.5 rounded-xl shadow-sm shadow-brand-700/30 transition-all duration-300 group-hover:shadow-md group-hover:scale-105 group-hover:rotate-3 flex items-center justify-center">
+            <Scale className="w-6 h-6" aria-hidden="true" />
           </div>
           <div className="header-title-container flex flex-col justify-center">
             <h1 id="app-title" className="text-[15px] font-bold text-surface-900 tracking-tight leading-tight font-display transition-colors duration-300 group-hover:text-brand-700">Article Checker</h1>

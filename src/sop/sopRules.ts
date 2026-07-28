@@ -353,7 +353,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
   if (density < MIN_KEYWORD_DENSITY) {
     return result(
       16,
-      'failed',
+      'info',
       `Keyword "${keyword}" terlalu jarang muncul (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%. Sebarkan di beberapa paragraf secara alami.`,
       parsed.lead || parsed.title,
     );

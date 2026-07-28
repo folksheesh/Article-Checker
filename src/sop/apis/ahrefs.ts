@@ -1,5 +1,17 @@
 import { AHREFS_API_KEY, AHREFS_BASE_URL, AHREFS_DEFAULT_COUNTRY, AHREFS_TIMEOUT_MS } from '../config';
 
+function buildAhrefsUrl(keywords: string[], country: string): string {
+  const params = new URLSearchParams();
+  keywords.forEach((k) => params.append('keyword', k.trim()));
+  params.set('country', country);
+  params.set('mode', 'metrics');
+  const qs = params.toString();
+  if (import.meta.env.DEV) {
+    return `${AHREFS_BASE_URL}/keywords-explorer/keywords-overview?${qs}`;
+  }
+  return `/ahrefs-proxy.php?${qs}`;
+}
+
 export interface AhrefsKeywordMetric {
   keyword: string;
   searchVolume: number;
@@ -15,7 +27,7 @@ export interface AhrefsKeywordResult {
 }
 
 /**
- * Fetch keyword metrics from Ahrefs API v3.
+ * Fetch keyword metrics from Ahrefs API v3 via server-side proxy.
  * Reference: https://api.ahrefs.com/v3/keywords-explorer/keywords-overview
  */
 export async function fetchAhrefsKeywordMetrics(
@@ -35,12 +47,8 @@ export async function fetchAhrefsKeywordMetrics(
   const timeout = setTimeout(() => controller.abort(), AHREFS_TIMEOUT_MS);
 
   try {
-    const params = new URLSearchParams();
-    keywords.forEach((k) => params.append('keyword', k.trim()));
-    params.set('country', country);
-    params.set('mode', 'metrics');
-
-    const response = await fetch(`${AHREFS_BASE_URL}/keywords-explorer/keywords-overview?${params.toString()}`, {
+    const url = buildAhrefsUrl(keywords, country);
+    const response = await fetch(url, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,

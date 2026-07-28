@@ -9,7 +9,7 @@ export const GEMINI_API_KEY = import.meta.env?.VITE_GEMINI_API_KEY;
 export const GEMINI_BASE_URL = import.meta.env?.VITE_GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta';
 
 /** Default model for Gemini. */
-export const GEMINI_MODEL = import.meta.env?.VITE_GEMINI_MODEL ?? 'gemini-3.5-flash';
+export const GEMINI_MODEL = import.meta.env?.VITE_GEMINI_MODEL ?? 'gemini-3.5-flash-lite';
 
 // ===========================================================
 // AI PROVIDER CONFIGURATION (OpenAI — fallback)
@@ -51,7 +51,7 @@ export const OLLAMA_SKIP_AUTH = import.meta.env?.VITE_OLLAMA_SKIP_AUTH === 'true
 export const AHREFS_API_KEY = import.meta.env?.VITE_AHREFS_API_KEY;
 
 /** Ahrefs API v3 base URL. */
-export const AHREFS_BASE_URL = import.meta.env.DEV ? '/ahrefs-api' : (import.meta.env?.VITE_AHREFS_BASE_URL ?? 'https://api.ahrefs.com/v3');
+export const AHREFS_BASE_URL = '/ahrefs-api';
 
 /** Default country for keyword data. */
 export const AHREFS_DEFAULT_COUNTRY = import.meta.env?.VITE_AHREFS_DEFAULT_COUNTRY ?? 'id';
