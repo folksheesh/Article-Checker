@@ -82,14 +82,14 @@ export function AiErrorFallback({
   if (!error) return null;
 
   return (
-    <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 shadow-sm animate-fade-in">
+    <div className="p-4 rounded-xl bg-yellow-50 border border-yellow-200 shadow-sm animate-fade-in">
       <div className="flex items-start gap-3">
         <span className="text-lg shrink-0 mt-0.5">{ERROR_ICONS[error.type] || '\u2757'}</span>
         <div className="flex-1 min-w-0">
-          <p className="text-xs font-semibold text-amber-900 mb-1 leading-snug">
+          <p className="text-xs font-semibold text-yellow-900 mb-1 leading-snug">
             {error.userMessage}
           </p>
-          <p className="text-[10px] text-amber-600 leading-relaxed">
+          <p className="text-[10px] text-yellow-600 leading-relaxed">
             {(onRetry || onDismiss) && 'Silakan coba lagi atau tutup pesan ini.'}
           </p>
         </div>
@@ -99,7 +99,7 @@ export function AiErrorFallback({
           <button
             type="button"
             onClick={onRetry}
-            className="px-3 py-1.5 text-[10px] font-semibold text-amber-900 bg-amber-200/70 hover:bg-amber-300/70 rounded-lg transition flex items-center gap-1.5"
+            className="px-3 py-1.5 text-[10px] font-semibold text-yellow-900 bg-yellow-200/70 hover:bg-yellow-300/70 rounded-lg transition flex items-center gap-1.5"
           >
             <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             Coba Lagi
@@ -109,7 +109,7 @@ export function AiErrorFallback({
           <button
             type="button"
             onClick={() => { clearError(feature); onDismiss?.(); }}
-            className="px-3 py-1.5 text-[10px] font-medium text-amber-700 hover:text-amber-900 hover:bg-amber-100 rounded-lg transition"
+            className="px-3 py-1.5 text-[10px] font-medium text-yellow-700 hover:text-yellow-900 hover:bg-yellow-100 rounded-lg transition"
           >
             Tutup
           </button>

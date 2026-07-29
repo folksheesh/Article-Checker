@@ -10,7 +10,7 @@ import {
   SOP_QUESTIONS,
 } from './constants';
 import { countSentences, countWords, parseArticle } from './parser';
-import { runSopChecks, getPrimaryKeyword } from './sopRules';
+import { runSopChecks, getPrimaryKeyword, stripTrailingMetadata } from './sopRules';
 import type { ArticleInput, CheckResult, RuleId } from './types';
 import { AI_REWRITE_TIMEOUT_MS, AI_KEYWORD_TIMEOUT_MS } from './config';
 import { stripImages } from './images';
@@ -175,7 +175,8 @@ function ensureAltText(article: string, _keyword: string): string {
 
 function ensureCta(article: string, keyword: string): string {
   const parsed = parseArticle(article);
-  const last = parsed.bodyParagraphs[parsed.bodyParagraphs.length - 1];
+  const contentParagraphs = stripTrailingMetadata(parsed.bodyParagraphs);
+  const last = contentParagraphs[contentParagraphs.length - 1];
   const hasCta = last && CTA_KEYWORDS.some((k) => last.text.toLowerCase().includes(k)) && last.wordCount >= 5;
   if (hasCta) return article;
   const topic = keyword || 'layanan legal';

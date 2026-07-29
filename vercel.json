@@ -1,9 +1,0 @@
-{
-  "outputDirectory": "dist",
-  "rewrites": [
-    { "source": "/ollama", "destination": "/api/ollama" },
-    { "source": "/ollama/(.*)", "destination": "/api/ollama?apiPath=/$1" },
-    { "source": "/ahrefs-api", "destination": "/api/ahrefs" },
-    { "source": "/ahrefs-api/(.*)", "destination": "/api/ahrefs?apiPath=/$1" }
-  ]
-}

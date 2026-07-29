@@ -85,7 +85,7 @@ export function computeEvaluationAccuracy(
     color = 'text-emerald-600';
   } else if (overall >= 50) {
     label = 'Sedang';
-    color = 'text-amber-600';
+    color = 'text-[#8B7530]';
   } else {
     label = 'Rendah';
     color = 'text-red-600';
@@ -115,12 +115,12 @@ export function computeEvaluationAccuracy(
 
 export function getAccuracyBadgeClasses(overall: number): string {
   if (overall >= 80) return 'bg-emerald-50 border-emerald-200 text-emerald-700';
-  if (overall >= 50) return 'bg-amber-50 border-amber-200 text-amber-700';
+  if (overall >= 50) return 'bg-[#FDF5E6] border-[#F0DCA0] text-[#8B7530]';
   return 'bg-red-50 border-red-200 text-red-700';
 }
 
 export function getAccuracyBarColor(overall: number): string {
   if (overall >= 80) return 'bg-emerald-500';
-  if (overall >= 50) return 'bg-amber-500';
+  if (overall >= 50) return 'bg-[#D4A843]';
   return 'bg-red-500';
 }

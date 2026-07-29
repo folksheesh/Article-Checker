@@ -14,7 +14,7 @@ export default defineConfig({
       '/ahrefs-api': {
         target: 'https://api.ahrefs.com/v3',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/ahrefs-api/, ''),
+        rewrite: (path) => path.replace(/^\/ahrefs-api/, '/keywords-explorer'),
       },
     },
   },

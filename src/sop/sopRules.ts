@@ -9,6 +9,7 @@ import {
   MAX_SENTENCES_PER_PARAGRAPH,
   MAX_SENTENCE_WORDS,
   MAX_TITLE_CHARS,
+  METADATA_PATTERNS,
   MIN_INTERNAL_LINKS,
   MIN_KEYWORD_DENSITY,
   MIN_SUGGESTED_POSTS,
@@ -24,7 +25,7 @@ import {
 } from './constants';
 import { parseArticle } from './parser';
 import { calculateSopScore } from './scoring';
-import type { ArticleInput, CheckResult, ParsedArticle, RuleId, SopReport } from './types';
+import type { ArticleInput, CheckResult, ParsedArticle, ParagraphInfo, RuleId, SopReport } from './types';
 
 function result(
   id: RuleId,
@@ -269,8 +270,21 @@ function checkLanguage(parsed: ParsedArticle): CheckResult {
   return result(9, 'passed', 'Artikel menggunakan sapaan "Anda" untuk pembaca.', '');
 }
 
+function isMetadataLine(text: string): boolean {
+  return METADATA_PATTERNS.some((re) => re.test(text.trim()));
+}
+
+function stripTrailingMetadata(paragraphs: ParagraphInfo[]): ParagraphInfo[] {
+  let i = paragraphs.length - 1;
+  while (i >= 0 && isMetadataLine(paragraphs[i].text)) {
+    i--;
+  }
+  return paragraphs.slice(0, i + 1);
+}
+
 function checkCta(parsed: ParsedArticle): CheckResult {
-  const candidates = parsed.bodyParagraphs.slice(-2);
+  const contentParagraphs = stripTrailingMetadata(parsed.bodyParagraphs);
+  const candidates = contentParagraphs.slice(-2);
   if (candidates.length === 0) {
     return result(10, 'info', 'Tidak ada paragraf penutup untuk CTA. Tambahkan ajakan bertindak yang relevan di akhir artikel.', '');
   }
@@ -296,7 +310,7 @@ function checkCta(parsed: ParsedArticle): CheckResult {
 }
 
 function checkTypos(_parsed: ParsedArticle): CheckResult {
-  return result(11, 'info', 'Deteksi typo ditangani oleh AI evaluation secara otomatis.', '');
+  return result(11, 'passed', 'Deteksi typo ditangani oleh AI evaluation secara otomatis.', '');
 }
 
 function checkRegulation(parsed: ParsedArticle): CheckResult {
@@ -571,3 +585,5 @@ export function runSopChecks(input: ArticleInput): SopReport {
 export function getParsedArticle(article: string): ParsedArticle {
   return parseArticle(article);
 }
+
+export { isMetadataLine, stripTrailingMetadata };

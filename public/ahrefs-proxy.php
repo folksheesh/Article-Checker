@@ -1,7 +1,7 @@
 <?php
-// Optional: hardcode API key here if Authorization header doesn't pass through.
-// Uncomment and set your key:  define('AHREFS_API_KEY', 'your-key-here');
-// Otherwise, the key comes from the frontend (set via VITE_AHREFS_API_KEY at build time).
+// ISI API KEY AHRFFS KAMU DI SINI (hapus tanda // di depan define):
+// define('AHREFS_API_KEY', 'isi-api-key-kamu-disini');
+// Kalau tidak diisi, proxy coba ambil dari Authorization header frontend.
 
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, OPTIONS');
@@ -12,23 +12,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-$apiPath   = '/keywords-explorer/keywords-overview';
-$baseUrl   = 'https://api.ahrefs.com/v3';
-$queryStr  = $_SERVER['QUERY_STRING'] ?? '';
-$target    = $baseUrl . $apiPath . ($queryStr ? '?' . $queryStr : '');
+// Endpoint: /ahrefs-proxy.php?endpoint=overview&keywords=...&country=id&select=...
+// Endpoint: /ahrefs-proxy.php?endpoint=related-terms&keywords=...&country=id&select=...
+$endpoint   = $_GET['endpoint'] ?? 'overview';
+$baseUrl    = 'https://api.ahrefs.com/v3';
+$allowed    = ['overview', 'related-terms', 'matching-terms', 'search-suggestions'];
+$apiPath    = in_array($endpoint, $allowed) ? "/keywords-explorer/$endpoint" : '/keywords-explorer/overview';
+$queryStr   = $_SERVER['QUERY_STRING'] ?? '';
+// Remove 'endpoint' param from forwarded query string
+$queryStr   = preg_replace('/(^|&)endpoint=[^&]*/', '', $queryStr);
+$target     = $baseUrl . $apiPath . ($queryStr ? '?' . $queryStr : '');
 
-$authHeader = '';
-// 1. Hardcoded config (most reliable)
-if (defined('AHREFS_API_KEY')) {
-    $authHeader = 'Bearer ' . AHREFS_API_KEY;
-}
-// 2. Client Authorization header (sent by built frontend)
+// Auth: hardcoded > client header > env var
+$authHeader = defined('AHREFS_API_KEY') ? 'Bearer ' . AHREFS_API_KEY : '';
 if (!$authHeader) {
-    $authHeader = $_SERVER['HTTP_AUTHORIZATION']
-        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
-        ?? '';
+    $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
 }
-// 3. Server environment variable (e.g. set in php-fpm pool)
 if (!$authHeader) {
     $serverKey = getenv('AHREFS_API_KEY');
     if ($serverKey) $authHeader = 'Bearer ' . $serverKey;

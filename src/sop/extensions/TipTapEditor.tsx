@@ -422,8 +422,8 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
   if (!editor) return null;
 
   return (
-    <div onClick={onEditorClick} onMouseOver={onEditorMouseOver}>
-      <EditorContent editor={editor} />
+    <div className="w-full h-full" onClick={onEditorClick} onMouseOver={onEditorMouseOver}>
+      <EditorContent editor={editor} className="h-full" />
     </div>
   );
 });

@@ -89,7 +89,12 @@ export const CTA_KEYWORDS = [
   'hubungi',
   'daftar',
   'mendaftar',
+  'daftarkan',
   'klik',
+  'percayakan',
+  'hindari',
+  'gunakan',
+  'manfaatkan',
   'tim legal',
   'butuh bantuan',
   'hubungi kami',
@@ -108,6 +113,11 @@ export const WEAK_CTA_EXACT = [
   'hubungi kami',
   'klik di sini.',
   'klik di sini',
+];
+
+/** Patterns for trailing metadata blocks (Author, Editor, etc.) that may appear after CTA */
+export const METADATA_PATTERNS = [
+  /^(?:author|penulis|editor|reviewer|fact.?checked|disunting|diverifikasi|kontributor|penerjemah|proofreader|redaksi|tim redaksi|foto|fotografer|ilustrator|desainer)\s*:\s*/i,
 ];
 
 export const GENERIC_ALT = [

@@ -18,7 +18,7 @@ export function calculateSopScore(results: CheckResult[], wordCount: number): So
     status = {
       label: 'KUNING',
       desc: 'Perlu perbaikan kecil',
-      color: 'bg-amber-50 text-amber-900 border-amber-200',
+      color: 'bg-yellow-50 text-yellow-900 border-yellow-200',
     };
   } else {
     status = {
