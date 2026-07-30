@@ -369,7 +369,7 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
       16,
       'info',
       `Keyword "${keyword}" terlalu jarang muncul (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%. Sebarkan di beberapa paragraf secara alami.`,
-      parsed.lead || parsed.title,
+      '',
     );
   }
   if (density > MAX_KEYWORD_DENSITY) {
@@ -459,7 +459,7 @@ function checkHeadingQuality(parsed: ParsedArticle, keyword: string): CheckResul
       18,
       'failed',
       `Keyword "${keyword}" belum muncul di subheading H2. Tambahkan keyword pada H2 untuk fokus SEO yang lebih kuat.`,
-      h2[0].text,
+      '',
     );
   }
 

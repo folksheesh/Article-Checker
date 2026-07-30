@@ -97,8 +97,9 @@ export async function fetchAhrefsRelatedTerms(
   keywords: string[],
   country = AHREFS_DEFAULT_COUNTRY,
   apiKey = '',
+  limit = 30,
 ): Promise<AhrefsKeywordResult> {
-  return ahrefsFetch('related-terms', keywords, country, apiKey, { limit: '20' });
+  return ahrefsFetch('related-terms', keywords, country, apiKey, { limit: String(limit) });
 }
 
 /**

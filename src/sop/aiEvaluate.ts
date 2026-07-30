@@ -77,23 +77,28 @@ WEAK WORDS CHECK:
 - Contoh SALAH: Kalimat "usahanya berkembang pesat" → "hanya" adalah bagian dari "usahanya", JANGAN deteksi ❌
 - Contoh SALAH: Kalimat "dimungkinkan" → "mungkin" adalah bagian dari "dimungkinkan", JANGAN deteksi ❌
 - PENTING: Jangan hanya deteksi secara mekanis. Baca dan pahami KONTEKS KALIMAT di sekitar kata lemah tersebut.
-- Jika kata lemah digunakan dalam konteks yang TEPAT, WAJAR, atau sebagai bagian dari frasa umum yang tidak mengurangi kekuatan argumen, JANGAN flag sebagai Error.
-- Contoh kata "saja" yang TIDAK perlu di-flag:
+- Jika kata lemah digunakan dalam konteks yang TEPAT, WAJAR, atau sebagai bagian dari frasa umum yang tidak mengurangi kekuatan argumen, JANGAN flag sebagai Error maupun Information. Anggap telah lolos/lulus (passed).
+- Contoh kata "saja" yang TIDAK perlu di-flag (anggap lolos):
   * "Kapan saja" — frasa waktu yang wajar
   * "Di mana saja" — frasa tempat yang wajar
   * "Siapa saja" — frasa orang yang wajar
   * "Apa saja" — frasa benda/pilihan yang wajar
   * "Bagaimana saja" — frasa cara yang wajar
   * "Kapanpun saja" — sama dengan "kapan saja"
+  * "Hanya saja" — frasa transisi yang wajar
+  * "Tidak hanya" — frasa penekanan yang wajar
+  * "Bukan hanya" — frasa penekanan yang wajar
 - Contoh kata "saja" yang PERLU di-flag:
   * "Ini saja yang bisa dilakukan" — meremehkan/mengurangi keyakinan
   * "Hanya itu saja" — mengurangi dampak argumen
-- Contoh kata "hanya" yang TIDAK perlu di-flag:
+- Contoh kata "hanya" yang TIDAK perlu di-flag (anggap lolos):
   * "Hanya saja" — frasa transisi yang wajar
   * "Tidak hanya itu" — frasa penekanan yang wajar
+  * "Hanya dengan" — frasa syarat yang wajar
+  * "Hanya jika" — frasa kondisi yang wajar
 - CONTOH KESALAHAN YANG SERING TERJADI: Jika artikel menggunakan "kapan saja" dalam konteks "Daftar sekarang, kapan saja Anda siap", ini ADALAH frasa waktu yang wajar dan BUKAN weak word. Jangan flag ❌
 - Jika kata lemah ditemukan sebagai whole word DAN digunakan dalam konteks yang benar-benar melemahkan argumen, buat item evaluasi dengan kategori "Error"
-- Jika kata lemah ditemukan tetapi digunakan dalam frasa umum atau konteks yang wajar, beri kategori "Information" dengan catatan bahwa penggunaannya masih dalam batas wajar
+- Jika kata lemah ditemukan tetapi digunakan dalam frasa umum atau konteks yang wajar, jangan buat item evaluasi sama sekali (anggap lolos/passed)
 
 LEGISLATIVE VALIDATION:
 - Ekstrak semua referensi regulasi dari artikel (UU, PP, Permen, Peraturan, dll) beserta tahun/nomornya.

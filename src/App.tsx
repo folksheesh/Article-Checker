@@ -497,6 +497,7 @@ function AppContent() {
   const [kwGenError, setKwGenError] = useState('');
 
   const [selectedKeywords, setSelectedKeywords] = useState<Set<string>>(new Set());
+  const [kwPage, setKwPage] = useState(1);
   const [kwInput] = useState('');
   const [fileImportLoading, setFileImportLoading] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
@@ -542,6 +543,7 @@ function AppContent() {
 
   useEffect(() => { ignoredIdsRef.current = ignoredIds; }, [ignoredIds]);
   useEffect(() => { approvedIdsRef.current = approvedIds; }, [approvedIds]);
+  useEffect(() => { setKwPage(1); }, [ahrefsMetrics.length]);
 
   const chatRef = useRef<HTMLDivElement>(null);
 
@@ -1488,6 +1490,11 @@ function AppContent() {
     const currentIdx = focusIndices[issue.id] ?? 0;
     const targetText = texts.length > 1 ? texts[currentIdx % texts.length] : issue.problematic_text;
 
+    // Validate target text actually exists in article before attempting scroll/highlight
+    const html = handle.getHTML();
+    const plainText = getTextContent(html);
+    if (!targetText || !plainText.toLowerCase().includes(targetText.trim().toLowerCase())) return;
+
     // 1. Try to find the exact highlighted mark by data-issue-ids (plural) or data-issue-id (singular)
     const allMarksWithIds = Array.from(
       editorEl.querySelectorAll('mark[data-issue-ids], mark[data-issue-id]'),
@@ -1658,13 +1665,17 @@ const handleAutoCorrect = async (item: CheckResult) => {
                 {
                   role: 'system',
                   content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
-Ganti SATU kata lemah "${targetWord}" dalam kalimat di bawah dengan kata yang lebih tepat dan kuat sesuai KONTEKS kalimat.
+Analisis kata "${targetWord}" dalam konteks kalimat di bawah.
+
+Tugas Anda:
+1. Baca kalimat utuh dan pahami makna kata "${targetWord}" dalam konteks kalimat tersebut.
+2. Jika "${targetWord}" digunakan secara wajar — sebagai bagian dari frasa umum, transisi, penekanan, atau struktur kalimat yang tepat — KEMBALIKAN kata aslinya.
+3. HANYA sarankan pengganti jika "${targetWord}" benar-benar melemahkan argumen atau tidak sesuai konteks.
 ${item.suggested_fix ? `\nPanduan perbaikan: ${item.suggested_fix}` : ''}
 
 Aturan:
-- HANYA ganti kata "${targetWord}" — jangan ubah kata lain dalam kalimat.
-- Pilih pengganti yang SESUAI KONTEKS kalimat. Jangan paksa ganti jika tidak ada padanan yang tepat.
-- Jika "${targetWord}" sudah tepat dalam konteks ini (misal: "hanya...yang..." dalam struktur kalimat), atau memang tidak ada pengganti yang lebih baik, kembalikan kata aslinya "${targetWord}".
+- Jangan paksa ganti. Jika ragu, kembalikan kata aslinya.
+- HANYA ganti kata "${targetWord}" — jangan ubah kata lain.
 - Kembalikan JSON: { "replacement": "..." }`,
                 },
                 { role: 'user', content: item.target_highlight.sentence_context },
@@ -1687,6 +1698,7 @@ Aturan:
           return;
         }
 
+        const scrollY = window.scrollY;
         const newArticle = article.slice(0, m.start) + correction + article.slice(m.end);
         setArticle(newArticle);
         isUpdatingFromCodeRef.current = true;
@@ -1696,7 +1708,7 @@ Aturan:
         const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
         setLiveReport(newReport);
         setReport(newReport);
-        requestAnimationFrame(() => applyHighlights(newReport));
+        requestAnimationFrame(() => { applyHighlights(newReport); window.scrollTo(0, scrollY); });
         setFlashText('Auto Correct berhasil.');
         setTimeout(() => setFlashText(''), 3000);
         return;
@@ -1806,6 +1818,10 @@ ATURAN:
           setTimeout(() => setFlashText(''), 3000);
         }
         setHover(null);
+        const nextIgnored2 = new Set(ignoredIds);
+        nextIgnored2.add(item.id);
+        setIgnoredIds(nextIgnored2);
+        ignoredIdsRef.current = nextIgnored2;
         const finalReport = runSopChecks({ article, keyword, metaTitle, metaDesc });
         setLiveReport(finalReport);
         setReport(finalReport);
@@ -1818,9 +1834,14 @@ ATURAN:
       if (applied === 0) {
         setFlashText('Teks asli tidak ditemukan persis di artikel — koreksi dilewati.');
         setTimeout(() => setFlashText(''), 3000);
+        const nextIgnored3 = new Set(ignoredIds);
+        nextIgnored3.add(item.id);
+        setIgnoredIds(nextIgnored3);
+        ignoredIdsRef.current = nextIgnored3;
         return;
       }
 
+      const scrollY2 = window.scrollY;
       setArticle(newArticle);
       // Apply to TipTap editor via surgical range replace (no setContent)
       isUpdatingFromCodeRef.current = true;
@@ -1836,10 +1857,14 @@ ATURAN:
       }
       isUpdatingFromCodeRef.current = false;
       setHover(null);
+      const nextIgnored = new Set(ignoredIds);
+      nextIgnored.add(item.id);
+      setIgnoredIds(nextIgnored);
+      ignoredIdsRef.current = nextIgnored;
       const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
-      requestAnimationFrame(() => applyHighlights(newReport));
+      requestAnimationFrame(() => { applyHighlights(newReport); window.scrollTo(0, scrollY2); });
       setFlashText(`Auto Correct berhasil (${applied} koreksi, ${skipped} dilewati).`);
       setTimeout(() => setFlashText(''), 3000);
     } catch (err: unknown) {
@@ -1896,6 +1921,10 @@ Kembalikan JSON array koreksi:
           }
           isUpdatingFromCodeRef.current = false;
           setHover(null);
+          const nextIgnored4 = new Set(ignoredIds);
+          nextIgnored4.add(item.id);
+          setIgnoredIds(nextIgnored4);
+          ignoredIdsRef.current = nextIgnored4;
           const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
           setLiveReport(newReport);
           setReport(newReport);
@@ -1913,6 +1942,10 @@ Kembalikan JSON array koreksi:
   setFlashText('Auto Correct tidak tersedia untuk item ini.');
   setTimeout(() => setFlashText(''), 3000);
   setHover(null);
+  const nextIgnored5 = new Set(ignoredIds);
+  nextIgnored5.add(item.id);
+  setIgnoredIds(nextIgnored5);
+  ignoredIdsRef.current = nextIgnored5;
 };
 
   const handleAutoCorrectCase = (item: CheckResult) => {
@@ -2003,28 +2036,58 @@ Kembalikan JSON SAJA: { "metaDescription": "..." }`,
         }
 
         if (aiKeywords.length > 0) {
-          // Step 2: Take top 20 AI keywords and check Ahrefs metrics in batches of 10
-          const topKeywords = aiKeywords.slice(0, 20);
+          // Step 2: Take top 30 AI keywords
+          const topKeywords = aiKeywords.slice(0, 30);
           keywords = topKeywords;
 
           const results: AhrefsKeywordMetric[] = [];
           let ahrefsError = '';
 
+          // Step 3: Get related terms from top 5 AI keywords (yields keywords in Ahrefs db)
+          const seedKws = topKeywords.slice(0, 5);
+          const related = await fetchAhrefsRelatedTerms(seedKws, 'id', AHREFS_API_KEY, 30);
+          if (related.data.length > 0) results.push(...related.data);
+          if (related.error && !ahrefsError) ahrefsError = related.error;
+
+          // Step 4: Check top 30 AI keywords against overview for metrics (3 batches of 10)
           const batch1 = topKeywords.slice(0, 10);
           const batch2 = topKeywords.slice(10, 20);
+          const batch3 = topKeywords.slice(20, 30);
 
           const r1 = await fetchAhrefsKeywordMetrics(batch1, 'id', AHREFS_API_KEY);
           if (r1.data.length > 0) results.push(...r1.data);
-          if (r1.error) ahrefsError = r1.error;
+          if (r1.error && !ahrefsError) ahrefsError = r1.error;
 
-          if (batch2.length > 0) {
-            const r2 = await fetchAhrefsKeywordMetrics(batch2, 'id', AHREFS_API_KEY);
-            if (r2.data.length > 0) results.push(...r2.data);
-            if (r2.error && !ahrefsError) ahrefsError = r2.error;
+          const r2 = await fetchAhrefsKeywordMetrics(batch2, 'id', AHREFS_API_KEY);
+          if (r2.data.length > 0) results.push(...r2.data);
+          if (r2.error && !ahrefsError) ahrefsError = r2.error;
+
+          if (batch3.length > 0) {
+            const r3 = await fetchAhrefsKeywordMetrics(batch3, 'id', AHREFS_API_KEY);
+            if (r3.data.length > 0) results.push(...r3.data);
+            if (r3.error && !ahrefsError) ahrefsError = r3.error;
           }
 
-          if (results.length > 0) {
-            setAhrefsMetrics(results);
+          // Step 5: Deduplicate by keyword (keep first occurrence)
+          const seen = new Set<string>();
+          const deduped: AhrefsKeywordMetric[] = [];
+          for (const m of results) {
+            if (!seen.has(m.keyword.toLowerCase())) {
+              seen.add(m.keyword.toLowerCase());
+              deduped.push(m);
+            }
+          }
+
+          // Step 6: Sort by relevance to article, then by volume desc
+          const articleText = stripImages(article);
+          deduped.sort((a, b) => {
+            const relDiff = computeRelevance(b.keyword, articleText) - computeRelevance(a.keyword, articleText);
+            if (relDiff !== 0) return relDiff;
+            return b.searchVolume - a.searchVolume;
+          });
+
+          if (deduped.length > 0) {
+            setAhrefsMetrics(deduped);
           } else {
             setAhrefsMetrics(generateMockAhrefsMetrics(topKeywords));
             if (ahrefsError.includes('API key') || ahrefsError.includes('tidak dikonfigurasi')) {
@@ -3029,17 +3092,29 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
             </div>
             <div className="section-meta-fields grid grid-cols-1 md:grid-cols-3 gap-4">
               <div id="meta-keyword-field" className="col-span-1 bg-white rounded-xl border border-surface-200 p-3 shadow-sm transition-all duration-300 hover:shadow-md hover:border-brand-300 group hover:-translate-y-0.5">
-                <label htmlFor="input-keyword" className="block text-[10px] font-bold uppercase tracking-wider text-surface-600 mb-1.5 transition-colors group-focus-within:text-brand-600">
-                  Keyword
-                </label>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="input-keyword" className="text-[10px] font-bold uppercase tracking-wider text-surface-600 transition-colors group-focus-within:text-brand-600">
+                    Keyword
+                  </label>
+                  <button
+                    id="btn-keyword-generate"
+                    type="button"
+                    onClick={() => { setShowKwPopup(true); handleAnalyzeKeywords(); }}
+                    className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-brand-600 hover:text-brand-700 hover:bg-brand-50 transition-colors text-[10px] font-medium"
+                    title="Generate keyword dengan AI"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">AI</span>
+                  </button>
+                </div>
+                <div className="flex items-center gap-1.5 min-w-0">
                   <input
                     id="input-keyword"
                     type="text"
                     value={keyword}
                     onChange={(e) => setKeyword(e.target.value)}
                     placeholder="mendaftarkan merek"
-                    className="flex-1 bg-transparent border-b border-surface-200 hover:border-surface-300 focus:border-brand-500 outline-none py-1 text-sm text-surface-800 placeholder:text-surface-300 transition-colors"
+                    className="flex-1 min-w-0 bg-transparent border-b border-surface-200 hover:border-surface-300 focus:border-brand-500 outline-none py-1 text-sm text-surface-800 placeholder:text-surface-300 transition-colors"
                   />
                   {keyword.length > 0 && (
                     <button
@@ -3052,16 +3127,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       <X className="w-3.5 h-3.5" />
                     </button>
                   )}
-                  <button
-                    id="btn-keyword-generate"
-                    type="button"
-                    onClick={() => { setShowKwPopup(true); handleAnalyzeKeywords(); }}
-                    className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-brand-600 hover:text-brand-700 hover:bg-brand-50 transition-colors text-[10px] font-medium"
-                    title="Generate keyword dengan AI"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span className="hidden sm:inline">AI</span>
-                  </button>
                 </div>
                 <div className="text-[10px] text-surface-400 mt-1.5 h-4" aria-live="polite">
                   {keyword.length > 0 && `${keyword.length} karakter`}
@@ -3115,28 +3180,28 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                   type="button"
                   onClick={handleGenerateMetaDesc}
                   disabled={metaDescLoading}
-                  className="flex items-center gap-1 px-2 py-1 rounded-md text-brand-600 hover:text-brand-700 hover:bg-brand-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-medium"
+                  className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md text-brand-600 hover:text-brand-700 hover:bg-brand-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-medium"
                   title="Generate deskripsi dengan AI"
                 >
                   {metaDescLoading ? <Loader className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
                   <span className="hidden sm:inline">AI</span>
                 </button>
               </div>
-              <div className="relative">
+              <div className="flex items-center gap-1.5 min-w-0">
                 <input
                   id="input-desc"
                   type="text"
                   value={metaDesc}
                   onChange={(e) => setMetaDesc(e.target.value)}
                   placeholder="Ringkasan singkat artikel"
-                  className="w-full pr-6 bg-transparent border-b border-surface-200 hover:border-surface-300 focus:border-brand-500 outline-none py-1 text-sm text-surface-600 placeholder:text-surface-300 transition-colors"
+                  className="flex-1 min-w-0 bg-transparent border-b border-surface-200 hover:border-surface-300 focus:border-brand-500 outline-none py-1 text-sm text-surface-600 placeholder:text-surface-300 transition-colors"
                 />
                 {metaDesc.length > 0 && (
                   <button
                     id="btn-desc-clear"
                     type="button"
                     onClick={() => setMetaDesc('')}
-                    className="absolute right-0 top-1/2 -translate-y-1/2 p-1 text-surface-400 hover:text-brand-600 transition-colors"
+                    className="shrink-0 p-1 rounded-md text-surface-300 hover:text-brand-600 hover:bg-brand-50 transition-colors"
                     title="Hapus deskripsi"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -3194,10 +3259,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 </div>
                 <p className="text-sm font-bold text-surface-700 mb-1">Belum Ada Skor</p>
                 <p className="text-[11px] text-surface-500 leading-relaxed mb-4 max-w-[200px]">Klik <strong className="text-brand-600 font-bold">Periksa</strong> untuk memulai evaluasi artikel</p>
-                <div className="flex items-center gap-2 text-[10px] font-medium text-surface-400 bg-surface-50 px-3 py-1.5 rounded-full border border-surface-100">
-                  <div className="w-1.5 h-1.5 rounded-full bg-brand-400 animate-pulse" />
-                  Menunggu...
-                </div>
               </div>
             ) : aiLoading ? (
               /* Single centered loading animation */
@@ -3487,12 +3548,13 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       id="issue-popup-ignore"
                       type="button"
                       onClick={() => {
+                        const scrollY = window.scrollY;
                         const next = new Set(ignoredIds);
                         if (next.has(issue.id)) next.delete(issue.id); else next.add(issue.id);
                         setIgnoredIds(next);
                         ignoredIdsRef.current = next;
                         setHover(null);
-                        setTimeout(() => applyHighlights(undefined, activeEvalTab), 50);
+                        setTimeout(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); }, 50);
                       }}
                       className="text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-surface-100 text-surface-700 hover:bg-red-50 hover:text-red-600 transition-colors"
                     >
@@ -3607,7 +3669,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           </div>
 
           {/* Chatbot */}
-          <div id="chatbot-container" className="chatbot-widget absolute bottom-6 right-4 z-[100] flex flex-col items-end gap-3">
+          <div id="chatbot-container" className="chatbot-widget fixed bottom-6 right-4 z-[100] flex flex-col items-end gap-3">
           {chatOpen && (
             <div id="chat-panel" ref={chatRef} className="w-80 sm:w-96 h-[400px] bg-white/95 backdrop-blur-xl border border-surface-200 shadow-2xl shadow-brand-900/10 rounded-2xl flex flex-col overflow-hidden animate-slide-in-right origin-bottom-right">
               <div id="chat-header" className="flex items-center justify-between px-4 py-3 border-b border-surface-100 bg-surface-50/80">
@@ -3835,51 +3897,44 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           const allApproved = catItems.length > 0 && catItems.every((item) => approvedIds.has(item.id) || item.status === 'passed');
                           if (st === 'passed' || allApproved) {
                             c.push(cat);
-                          } else if (st === 'failed' && i?.problematic_text?.trim()) {
+                          } else if (i?.problematic_text?.trim()) {
                             a.push(cat);
                           } else {
                             b.push(cat);
                           }
                         }
-                        const toggleCategoryApprove = (catId: string) => {
+                        const toggleCategoryIgnore = (catId: string) => {
+                          const scrollY = window.scrollY;
                           const items = activeReport.items.filter((item) => CATEGORIES.find((c) => c.id === catId)?.checks.includes(item.id));
-                          const isAlreadyApproved = items.some((item) => approvedIds.has(item.id));
-                          let anyIsIgnored = false;
-                          if (!isAlreadyApproved) {
-                            anyIsIgnored = items.some((item) => item.status !== 'passed' && ignoredIds.has(item.id));
-                          }
-                          const nextApproved = new Set(approvedIds);
+                          const isAlreadyIgnored = items.some((item) => ignoredIds.has(item.id));
                           const nextIgnored = new Set(ignoredIds);
-                          if (isAlreadyApproved) {
-                            items.forEach((item) => nextApproved.delete(item.id));
-                          } else {
-                            items.forEach((item) => nextApproved.add(item.id));
-                          }
-                          if (anyIsIgnored && !isAlreadyApproved) {
+                          const nextApproved = new Set(approvedIds);
+                          if (isAlreadyIgnored) {
                             items.forEach((item) => nextIgnored.delete(item.id));
+                          } else {
+                            items.forEach((item) => nextIgnored.add(item.id));
+                            items.forEach((item) => nextApproved.delete(item.id));
                           }
-                          setApprovedIds(nextApproved);
-                          approvedIdsRef.current = nextApproved;
                           setIgnoredIds(nextIgnored);
                           ignoredIdsRef.current = nextIgnored;
-                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
+                          setApprovedIds(nextApproved);
+                          approvedIdsRef.current = nextApproved;
+                          requestAnimationFrame(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); });
                         };
-                        const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean, showApprove = false) => {
+                        const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
                           const iss = getCategoryIssue(activeReport, cat.id);
                           const st = getCategoryStatus(activeReport, cat.id);
                           const isPassed = st === 'passed';
                           const catItems = activeReport.items.filter((item) => cat.checks.includes(item.id));
                           const allIgnored = catItems.every((item) => ignoredIds.has(item.id) || item.status === 'passed');
-                          const allApproved = catItems.every((item) => approvedIds.has(item.id) || item.status === 'passed');
-                          const isApproved = allApproved && !isPassed;
-                          const isIgnored = allIgnored && !allApproved && !isPassed;
-                          const visualPassed = isPassed || isApproved;
+                          const isIgnored = allIgnored && !isPassed;
+                          const visualPassed = isPassed;
                           const cardDisabled = !visualPassed && (isIgnored || !clickable);
                           const itemForReason = iss || catItems.find((item) => cat.checks.includes(item.id));
                           return (
                             <div key={cat.id} className={`flex items-center gap-1 transition-all duration-300 ease-in-out ${isIgnored ? 'opacity-60 scale-[0.98]' : 'opacity-100 scale-100'}`}>
                               <button type="button" onClick={() => clickable && iss && !cardDisabled && focusIssue(iss)} disabled={cardDisabled}
-                                className={`flex-1 flex items-center gap-2.5 p-2.5 rounded-xl border-l-[3px] border transition-all duration-200 text-left group ${visualPassed ? 'bg-white border-emerald-100 border-l-emerald-400 cursor-default' : isIgnored ? 'bg-gray-50/50 border-gray-100 border-l-gray-200 cursor-default' : clickable ? 'bg-white border-brand-100 border-l-brand-500 hover:bg-brand-50/30 hover:border-brand-200 hover:shadow-sm cursor-pointer active:scale-[0.99]' : 'bg-white border-gray-100 border-l-gray-200 cursor-default'}`}>
+                                className={`flex-1 flex items-center gap-2.5 p-2.5 rounded-xl border-l-[3px] border transition-all duration-200 text-left group ${visualPassed ? 'bg-white border-emerald-100 border-l-emerald-400 cursor-default' : isIgnored ? 'bg-gray-50/50 border-gray-100 border-l-gray-200 cursor-default' : clickable ? 'bg-brand-50/50 border-brand-200 border-l-brand-500 hover:bg-brand-50/70 hover:border-brand-300 hover:shadow-sm cursor-pointer active:scale-[0.99]' : 'bg-brand-50/30 border-brand-100 border-l-brand-400 cursor-default'}`}>
                                 <div className="flex-1 min-w-0">
                                   <div className={`text-xs font-medium ${visualPassed ? 'text-emerald-600' : isIgnored ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
                                   {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">
@@ -3893,16 +3948,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                 </div>
                                 {visualPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : isIgnored ? <CheckCircle2 className="w-3.5 h-3.5 text-gray-300 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
                               </button>
-                              {!visualPassed && !allApproved && !allIgnored && (
+                              {!visualPassed && !allIgnored && (
                                 <div className="flex items-center gap-0.5">
-                                  {showApprove && (
-                                    <button type="button" onClick={() => toggleCategoryApprove(cat.id)}
-                                      className="shrink-0 p-2 rounded-lg hover:bg-emerald-50 transition text-surface-300 hover:text-emerald-500 group/btn"
-                                      title="Setujui — anggap sudah benar"
-                                    >
-                                      <CheckCircle2 className="w-3.5 h-3.5 group-hover/btn:scale-110 transition-transform duration-200" />
-                                    </button>
-                                  )}
                                   <button type="button" onClick={() => toggleCategoryIgnore(cat.id)}
                                     className="shrink-0 p-2 rounded-lg hover:bg-surface-100 transition text-surface-300 hover:text-surface-500 group/btn"
                                     title="Abaikan issue ini"
@@ -3910,14 +3957,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                     <X className="w-3.5 h-3.5 group-hover/btn:rotate-90 transition-transform duration-200" />
                                   </button>
                                 </div>
-                              )}
-                              {isApproved && (
-                                <button type="button" onClick={() => toggleCategoryApprove(cat.id)}
-                                  className="shrink-0 p-2 rounded-lg hover:bg-amber-50 transition text-emerald-400 hover:text-amber-500 group/btn"
-                                  title="Batalkan persetujuan"
-                                >
-                                  <RotateCcw className="w-3.5 h-3.5 group-hover/btn:rotate-180 transition-transform duration-300" />
-                                </button>
                               )}
                               {isIgnored && !isPassed && (
                                 <button type="button" onClick={() => toggleCategoryIgnore(cat.id)}
@@ -3932,8 +3971,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         };
                         return (
                           <>
-                            {a.length > 0 && <div className="space-y-2"><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-600 uppercase tracking-wider mb-1.5 px-0.5"><AlertCircle className="w-3 h-3" /> Perlu Diperbaiki</div>{a.map((c) => renderRow(c, true, false))}</div>}
-                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-500 uppercase tracking-wider mb-1.5 px-0.5"><Info className="w-3 h-3" /> Perlu Review</div>{b.map((c) => renderRow(c, false, true))}</div>}
+                            {a.length > 0 && <div className="space-y-2"><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-600 uppercase tracking-wider mb-1.5 px-0.5"><AlertCircle className="w-3 h-3" /> Dapat Diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
+                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-500 uppercase tracking-wider mb-1.5 px-0.5"><Info className="w-3 h-3" /> Perlu Review</div>{b.map((c) => renderRow(c, false))}</div>}
                             {c.length > 0 && (
                               <div className="mt-4 pt-3 border-t border-gray-100">
                                 <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
@@ -3974,28 +4013,18 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         </div>
                       )}
 
-                      {hasChecked && aiResults && aiResults.results.length > 0 && (() => {
+                       {hasChecked && aiResults && aiResults.results.length > 0 && (() => {
                         const toggleAiIgnore = (id: number) => {
+                          const scrollY = window.scrollY;
                           const next = new Set(ignoredIds);
                           if (next.has(id)) next.delete(id); else next.add(id);
-                        setIgnoredIds(next);
-                        ignoredIdsRef.current = next;
+                          setIgnoredIds(next);
+                          ignoredIdsRef.current = next;
                           const nextApproved = new Set(approvedIds);
                           nextApproved.delete(id);
                           setApprovedIds(nextApproved);
                           approvedIdsRef.current = nextApproved;
-                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
-                        };
-                        const toggleAiApprove = (id: number) => {
-                          const next = new Set(approvedIds);
-                          if (next.has(id)) next.delete(id); else next.add(id);
-                          setApprovedIds(next);
-                          approvedIdsRef.current = next;
-                          const nextIgnored = new Set(ignoredIds);
-                          nextIgnored.delete(id);
-                          setIgnoredIds(nextIgnored);
-                          ignoredIdsRef.current = nextIgnored;
-                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
+                          requestAnimationFrame(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); });
                         };
                         const visibleAiResults = aiResults.results.filter((r) => {
                           if (r.status === 'deferred') return true;
@@ -4081,14 +4110,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                     </Card>
                                     {!passed && !isIgnored && (
                                       <div className="flex flex-col items-center gap-0.5 mt-2">
-                                        {!isError && (
-                                          <button type="button" onClick={() => toggleAiApprove(r.id)}
-                                            className="shrink-0 p-2 rounded-lg hover:bg-emerald-50 transition text-surface-300 hover:text-emerald-500 group/btn"
-                                            title="Setujui — anggap sudah benar"
-                                          >
-                                            <CheckCircle2 className="w-3.5 h-3.5 group-hover/btn:scale-110 transition-transform duration-200" />
-                                          </button>
-                                        )}
                                         <button type="button" onClick={() => toggleAiIgnore(r.id)}
                                           className="shrink-0 p-2 rounded-lg hover:bg-surface-100 transition text-surface-300 hover:text-surface-500 group/btn"
                                           title="Abaikan issue ini"
@@ -4383,6 +4404,12 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
               )}
 
               {ahrefsMetrics.length > 0 ? (
+                (() => {
+                  const PER_PAGE = 10;
+                  const totalPages = Math.ceil(ahrefsMetrics.length / PER_PAGE);
+                  const start = (kwPage - 1) * PER_PAGE;
+                  const pageItems = ahrefsMetrics.slice(start, start + PER_PAGE);
+                  return (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <p className="text-xs text-gray-500">
@@ -4422,7 +4449,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         </tr>
                       </thead>
                       <tbody>
-                        {ahrefsMetrics.map((m) => {
+                        {pageItems.map((m) => {
                           const rel = computeRelevance(m.keyword, stripImages(article));
                           const kdColor = m.keywordDifficulty >= 60 ? 'text-emerald-600' : m.keywordDifficulty >= 30 ? 'text-yellow-600' : 'text-red-600';
                           const relColor = rel >= 7 ? 'text-emerald-600' : rel >= 4 ? 'text-yellow-600' : 'text-red-600';
@@ -4452,7 +4479,33 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       </tbody>
                     </table>
                   </div>
+
+                  {totalPages > 1 && (
+                    <div className="flex items-center justify-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => setKwPage((p) => Math.max(1, p - 1))}
+                        disabled={kwPage <= 1}
+                        className="px-2.5 py-1 text-[10px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                      >
+                        Prev
+                      </button>
+                      <span className="text-[10px] text-gray-500">
+                        {kwPage} / {totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setKwPage((p) => Math.min(totalPages, p + 1))}
+                        disabled={kwPage >= totalPages}
+                        className="px-2.5 py-1 text-[10px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                      >
+                        Next
+                      </button>
+                    </div>
+                  )}
                 </div>
+                );
+              })()
               ) : !kwGenLoading && (
                 <div className="text-center py-8">
                   <Globe className="w-10 h-10 text-gray-300 mx-auto mb-3" />
