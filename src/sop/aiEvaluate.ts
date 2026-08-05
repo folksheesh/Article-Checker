@@ -39,8 +39,14 @@ function buildSkippedOutput(fallbackReason?: string): AiEvaluationOutput {
 }
 
 export async function evaluateWithAI(input: AiEvaluationInput, signal?: AbortSignal): Promise<AiEvaluationOutput> {
-  const systemPrompt = `Anda adalah Editor Senior dan Ahli Hukum Konten Digital Indonesia.
-Tugas Anda mengevaluasi artikel hukum berdasarkan SOP dan aturan berikut. Keluarkan hasil HANYA dalam format JSON.
+  const systemPrompt = `Kamu adalah AI Evaluator yang memeriksa artikel berdasarkan checklist SOP. Setiap masalah yang kamu laporkan akan ditampilkan langsung ke user dan bisa diklik untuk lompat ke lokasi persis di artikel. Karena itu, akurasi dan kejujuran atas apa yang benar-benar ada di teks jauh lebih penting daripada terlihat lengkap menjawab semua pertanyaan checklist. Keluarkan hasil HANYA dalam format JSON.
+
+ATURAN UTAMA:
+1. Jangan pernah mengarang atau menyusun ulang kutipan. Setiap kali kamu melaporkan sebuah masalah pada teks tertentu, kutipan yang kamu tampilkan harus persis sama, kata per kata, dengan apa yang tertulis di artikel sumber. Dilarang menggabungkan potongan dari kalimat atau paragraf yang berbeda menjadi satu kutipan baru, dan dilarang membuat "contoh" kalimat rusak sendiri untuk mengilustrasikan sebuah masalah. Kalau kamu tidak yakin sebuah kutipan benar-benar ada persis seperti itu di artikel, jangan laporkan sebagai masalah.
+2. Boleh menjawab valid, tidak perlu memaksakan menemukan masalah. Tidak semua pertanyaan checklist harus punya temuan. Kalau sebuah aturan sudah terpenuhi dengan baik, jawab bahwa itu valid dan berhenti di situ. Mengarang masalah yang sebenarnya tidak ada jauh lebih merugikan daripada melewatkan satu masalah kecil yang nyata. Utamakan ketepatan di atas kesan kelengkapan.
+3. Sertakan lokasi yang jelas untuk setiap masalah yang kamu laporkan, misalnya paragraf ke berapa dan kutipan persis kalimatnya, supaya sistem bisa mengarahkan user langsung ke bagian yang dimaksud dan menyorotnya. Semakin presisi dan semakin sesuai dengan teks asli kutipan yang kamu berikan, semakin bisa diandalkan fitur ini.
+4. Sebelum mengirim setiap temuan, cek ulang dirimu sendiri. Tanyakan: apakah kutipan ini benar-benar saya salin persis dari artikel, atau saya susun sendiri? Apakah saya menggabungkan bagian dari dua tempat berbeda? Apakah saya melaporkan ini hanya supaya terlihat menjawab, padahal sebenarnya bagian itu sudah baik? Kalau ragu, jangan laporkan sebagai masalah.
+5. Definisi lead: lead adalah satu blok teks yang diapit tanda kutip, terletak tepat di bawah judul, berdiri sendiri sebagai paragraf tersendiri. Hitung jumlah kalimat dan kata hanya dari teks di dalam tanda kutip itu, berhenti tepat di tanda kutip penutup, jangan ikut menghitung paragraf isi yang datang setelahnya.
 
 ATURAN EVALUASI:
 1. Nada bahasa profesional dan sesuai konteks legal.
@@ -71,7 +77,7 @@ ATURAN EVALUASI:
 7. Cek typo ejaan kata per kata — cari kata yang salah eja (bukan kalimat, tapi kata per kata). Jika ditemukan, buat item evaluasi dengan kategori "Error" dan set exact_word ke kata yang salah. Contoh: "wajibupdate" → "wajib update", "perusahaananda" → "perusahaan Anda", "darii" → "dari", "yangg" → "yang".
 
 WEAK WORDS CHECK:
-- Cari kata lemah sebagai whole word (kata utuh): "mungkin", "saja", "hanya"
+- Cari kata lemah sebagai whole word (kata utuh): "mungkin", "saja" (JANGAN DETEKSI kata "hanya")
 - Pastikan kata yang cocok adalah KATA UTUH, BUKAN substring dari kata lain.
 - Contoh BENAR: Kalimat "Hanya dia yang bisa datang" → "hanya" terdeteksi ✅
 - Contoh SALAH: Kalimat "usahanya berkembang pesat" → "hanya" adalah bagian dari "usahanya", JANGAN deteksi ❌
@@ -99,6 +105,7 @@ WEAK WORDS CHECK:
 - CONTOH KESALAHAN YANG SERING TERJADI: Jika artikel menggunakan "kapan saja" dalam konteks "Daftar sekarang, kapan saja Anda siap", ini ADALAH frasa waktu yang wajar dan BUKAN weak word. Jangan flag ❌
 - Jika kata lemah ditemukan sebagai whole word DAN digunakan dalam konteks yang benar-benar melemahkan argumen, buat item evaluasi dengan kategori "Error"
 - Jika kata lemah ditemukan tetapi digunakan dalam frasa umum atau konteks yang wajar, jangan buat item evaluasi sama sekali (anggap lolos/passed)
+
 
 LEGISLATIVE VALIDATION:
 - Ekstrak semua referensi regulasi dari artikel (UU, PP, Permen, Peraturan, dll) beserta tahun/nomornya.
@@ -191,7 +198,13 @@ PENTING:
 - Untuk item Information, set target_highlight ke null dan auto_correct_button: true.
 - point_penalty: 10 untuk Error, 0 untuk Information.`;
 
-  const cleanArticle = stripImages(input.article || '');
+  const cleanArticle = stripImages(input.article || '')
+    .replace(/\*\*(.*?)\*\*/g, '$1') // Bold **
+    .replace(/__(.*?)__/g, '$1') // Bold __
+    .replace(/\*(.*?)\*/g, '$1') // Italic *
+    .replace(/_(.*?)_/g, '$1') // Italic _
+    .replace(/`(.*?)`/g, '$1') // Inline code `
+    .replace(/~~(.*?)~~/g, '$1'); // Strikethrough ~~
 
   const truncatedArticle = cleanArticle.length > 8000
     ? cleanArticle.slice(0, 8000) + '\n\n...[artikel terpotong, lanjutan dihilangkan untuk efisiensi]'
@@ -241,11 +254,34 @@ ${truncatedArticle}`;
           sentence_context: r.target_highlight.sentence_context || '',
           start_index: r.target_highlight.start_index != null ? Number(r.target_highlight.start_index) : null,
           end_index: r.target_highlight.end_index != null ? Number(r.target_highlight.end_index) : null,
+          target_text: r.target_highlight.target_text || r.target_highlight.sentence_context || null,
+          target_type: r.target_highlight.target_type || 'sentence',
         } : undefined,
         point_penalty: r.point_penalty != null ? Number(r.point_penalty) : (cat === 'Information' ? 0 : 10),
         has_ignore_button: r.has_ignore_button !== false,
         auto_correct_button: Boolean(r.auto_correct_button) || cat === 'Error' || cat === 'Information',
       };
+    }).filter((r: any): r is CheckResult => r !== null);
+
+    // POST-PROCESSING VERIFICATION:
+    // Drop any issues where the claimed problematic text or sentence context doesn't actually exist in the article verbatim
+    const validatedResults = results.filter((r: CheckResult) => {
+      if (r.passed) return true;
+      if (!r.target_highlight) return true; // Keep macro/conceptual info issues if no highlight specified
+
+      const exactWord = (r.target_highlight.exact_word || '').trim();
+      const sentenceContext = (r.target_highlight.sentence_context || '').trim();
+
+      // If AI specified exact_word or sentence_context, at least one MUST exist verbatim in cleanArticle
+      let exactWordFound = exactWord ? cleanArticle.includes(exactWord) : false;
+      let sentenceFound = sentenceContext ? cleanArticle.includes(sentenceContext) : false;
+
+      // Drop hallucinated issue if neither exact_word nor sentence_context exist in cleanArticle
+      if ((exactWord && !exactWordFound) || (sentenceContext && !sentenceFound)) {
+        return false;
+      }
+
+      return true;
     });
 
     const rawSub = parsed.subScores || {};
@@ -266,7 +302,7 @@ ${truncatedArticle}`;
       ? parsed.bestNextMove.slice(0, 150)
       : '';
 
-    return { results, subScores, bestNextMove };
+    return { results: validatedResults, subScores, bestNextMove };
   } catch (err) {
     const info = classifyAiError(err);
     logAiError('sop-ai-eval', info);

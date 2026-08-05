@@ -9,6 +9,8 @@ export interface TargetHighlight {
   sentence_context: string;
   start_index: number | null;
   end_index: number | null;
+  target_text?: string;
+  target_type?: 'sentence' | 'paragraph' | 'lead';
 }
 
 export interface UiAction {
@@ -110,6 +112,7 @@ export interface ParsedArticle {
   title: string;
   titleRaw: string;
   lead: string;
+  leadRaw: string;
   leadWordCount: number;
   leadSentenceCount: number;
   paragraphs: ParagraphInfo[];

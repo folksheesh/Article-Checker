@@ -7,13 +7,15 @@ import type {
 } from './types';
 
 export function countWords(text: string): number {
-  const cleaned = text.replace(/[#*_`[\]()]/g, ' ').trim();
+  // Strip markdown inline punctuation and quote characters so they don't inflate word counts.
+  const cleaned = text.replace(/[#*_`[\]()"'“”‘’]/g, ' ').trim();
   if (!cleaned) return 0;
   return cleaned.split(/\s+/).filter(Boolean).length;
 }
 
 export function countSentences(text: string): number {
-  const cleaned = text.replace(/[#*_`[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+  // Strip markdown inline punctuation and quote characters so trailing quotes don't count as a sentence.
+  const cleaned = text.replace(/[#*_`[\]()!"'“”‘’]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!cleaned) return 0;
   const parts = cleaned.split(/[.!?]+/).filter((s) => s.trim().length > 0);
   return parts.length;
@@ -21,9 +23,11 @@ export function countSentences(text: string): number {
 
 function stripMarkdownInline(text: string): string {
   return text
+    .replace(/^>\s*/, '')
     .replace(/!\[[^\]]*]\([^)]*\)/g, '')
     .replace(/\[([^\]]+)]\([^)]*\)/g, '$1')
-    .replace(/[*_`]/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[*_`~]/g, '')
     .trim();
 }
 
@@ -128,24 +132,93 @@ export function parseArticle(article: string): ParsedArticle {
     });
   });
 
-  const titleHeading = headings.find((h) => h.level === 1);
-  const firstNonEmpty = paragraphs[0];
+  const titleHeading = headings.find((h) => h.level === 1)
+    ?? headings.find((h) => h.level === 2)
+    ?? headings.find((h) => h.level === 3);
+  const firstNonEmpty = paragraphs.find((p) => !p.isImage && !p.isList);
   const title = titleHeading?.text
-    ?? (firstNonEmpty && !firstNonEmpty.isList ? firstNonEmpty.text : '');
+    ?? (firstNonEmpty ? firstNonEmpty.text : '');
   const titleRaw = titleHeading?.raw
     ?? (firstNonEmpty ? lines[firstNonEmpty.lineIndex] : '');
+  const titleLineIndex = titleHeading?.lineIndex ?? firstNonEmpty?.lineIndex ?? -1;
 
-  const bodyStartIdx = titleHeading
-    ? paragraphs.findIndex((p) => p.lineIndex > titleHeading.lineIndex)
-    : paragraphs.length > 1
-      ? 1
-      : -1;
+  // Lead detection following strict specification:
+  // 1. First paragraph(s) DIRECTLY under title
+  // 2. Must be wrapped in double quotes (" or " at start, " or " at end)
+  // 3. Single block only (first quoted block found)
+  // 4. Can span multiple paragraphs if quote continues
 
-  const leadPara =
-    bodyStartIdx >= 0
-      ? paragraphs.slice(bodyStartIdx).find((p) => !p.isHeading && !p.isList && !p.isImage && p.text.length > 0)
-      : undefined;
-  const lead = leadPara?.text ?? '';
+  let lead = '';
+  let leadRaw = '';
+  let leadDetected = false;
+
+  // Get all paragraphs after title (before any H2 heading)
+
+  // Try to find quoted lead block
+  let inQuote = false;
+  let quoteText = '';
+  let quoteTextRaw = '';
+
+  // Also search raw lines (not just parsed paragraphs) for quote detection
+  // because TipTap may produce bold/italic markup inside quotes
+  const rawLinesAfterTitle = lines.slice(titleLineIndex + 1);
+
+  for (let i = 0; i < rawLinesAfterTitle.length; i++) {
+    const rawLine = rawLinesAfterTitle[i].trim();
+
+    // Skip empty lines (paragraph separators) but don't break
+    // Lead can have empty lines before it
+    if (!rawLine) {
+      // If we're in a quote and hit an empty line, the quote ended on previous line
+      if (inQuote) break;
+      continue;
+    }
+
+    // Skip headings, lists, images
+    if (/^#{1,3}\s+/.test(rawLine)) break;
+    if (/^(\s*[-*+]|\s*\d+\.)\s+/.test(rawLine)) {
+      if (inQuote) break;
+      continue;
+    }
+    if (/!\[[^\]]*]\([^)]*\)/.test(rawLine) && !rawLine.match(/[""]/)) {
+      if (inQuote) break;
+      continue;
+    }
+
+    const text = stripMarkdownInline(rawLine);
+    if (!text) continue;
+
+    const startsWithQuote = /^[\s\u200B]*["'\u2018\u2019\u201C\u201D\u201E\u201F\u00AB\u00BB]/i.test(text);
+    // Check if the CLEANED text ends with a closing quote (allowing trailing punctuation)
+    const endsWithQuote = /["'\u2018\u2019\u201C\u201D\u201E\u201F\u00AB\u00BB][.,!?\s\u200B]*$/i.test(text);
+
+    if (!inQuote) {
+      if (startsWithQuote) {
+        inQuote = true;
+        quoteText = text;
+        quoteTextRaw = rawLine;
+
+        if (endsWithQuote && quoteText.length > 2) {
+          lead = quoteText;
+          leadRaw = quoteTextRaw;
+          leadDetected = true;
+          break;
+        }
+      } else {
+        // Keep searching instead of breaking immediately
+        continue;
+      }
+    } else {
+      quoteText += ' ' + text;
+      quoteTextRaw += '\n' + rawLine;
+      if (endsWithQuote) {
+        lead = quoteText;
+        leadRaw = quoteTextRaw;
+        leadDetected = true;
+        break;
+      }
+    }
+  }
 
   const bodyParagraphs = paragraphs.filter(
     (p) => !p.isHeading && !p.isList && !p.isImage && p.text.length > 0,
@@ -161,9 +234,10 @@ export function parseArticle(article: string): ParsedArticle {
     lines,
     title,
     titleRaw,
-    lead,
-    leadWordCount: countWords(lead),
-    leadSentenceCount: countSentences(lead),
+    lead: leadDetected ? lead : '',
+    leadRaw: leadDetected ? leadRaw : '',
+    leadWordCount: leadDetected ? countWords(lead) : 0,
+    leadSentenceCount: leadDetected ? countSentences(lead) : 0,
     paragraphs,
     bodyParagraphs,
     headings,

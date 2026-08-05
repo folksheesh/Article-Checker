@@ -184,9 +184,11 @@ ${block.text}
 Periksa setiap paragraf berikut untuk masalah-masalah ini SAJA:
 
 1. Typo ejaan kata per kata — cari kata yang salah eja
-2. Weak words: "mungkin", "saja", "hanya"
+2. Weak words: "mungkin", "saja" (JANGAN flag kata "hanya")
 3. Kapitalisasi salah (awal kalimat, proper noun, "Anda")
 4. Nada bahasa tidak profesional
+
+DILARANG HALUSINASI: Hanya laporkan jika kata/kalimat bermasalah BENAR-BENAR ADA persis sama di dalam paragraf yang diberikan! Dilarang mengarang atau menyusun ulang teks!
 
 JANGAN evaluasi hal-hal yang membutuhkan konteks seluruh artikel seperti:
 - Legal validity / regulasi (ini akan dicek saat audit final)
@@ -238,9 +240,25 @@ export function parseIncrementalResponse(
     const paragraphResults = parsed.paragraph_results || [];
     for (const pr of paragraphResults) {
       const pIndex = pr.paragraph_index ?? 0;
+      const block = _changedBlocks.find((b) => b.index === pIndex) || _changedBlocks[0];
+      const blockText = block ? block.text : '';
+
       const results = pr.results || [];
       for (const r of results) {
         const passed = Boolean(r.passed);
+        if (!passed && r.target_highlight) {
+          const exactWord = (r.target_highlight.exact_word || '').trim();
+          const sentenceContext = (r.target_highlight.sentence_context || '').trim();
+
+          let exactWordFound = exactWord ? blockText.includes(exactWord) : false;
+          let sentenceFound = sentenceContext ? blockText.includes(sentenceContext) : false;
+
+          // Drop hallucinated issue if neither exact_word nor sentence_context exist in the paragraph
+          if ((exactWord && !exactWordFound) || (sentenceContext && !sentenceFound)) {
+            continue;
+          }
+        }
+
         const cat = r.category || (passed ? 'passed' : 'Error');
         allResults.push({
           id: (1000 + pIndex * 10 + allResults.length) as RuleId,

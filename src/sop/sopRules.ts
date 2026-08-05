@@ -32,6 +32,8 @@ function result(
   status: CheckResult['status'],
   reason: string,
   problematic_text = '',
+  target_text?: string,
+  target_type?: 'sentence' | 'paragraph' | 'lead',
 ): CheckResult {
   return {
     id,
@@ -40,6 +42,15 @@ function result(
     passed: status === 'passed' || status === 'deferred' || status === 'info',
     reason,
     problematic_text,
+    category: status === 'failed' ? 'Error' : status === 'info' ? 'Information' : undefined,
+    target_highlight: target_text ? {
+      exact_word: null,
+      sentence_context: target_text,
+      target_text,
+      target_type,
+      start_index: null,
+      end_index: null,
+    } : undefined,
   };
 }
 
@@ -150,7 +161,7 @@ function checkLead(parsed: ParsedArticle): CheckResult {
       3,
       'failed',
       `Lead maksimal 3 kalimat / 20 kata. Saat ini ${parsed.leadSentenceCount} kalimat / ${parsed.leadWordCount} kata.`,
-      parsed.lead,
+      parsed.leadRaw,
     );
   }
   return result(
@@ -365,12 +376,15 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
   const headingsWithKw = parsed.headings.filter((h) => h.text.toLowerCase().includes(kw)).length;
 
   if (density < MIN_KEYWORD_DENSITY) {
-    return result(
-      16,
-      'info',
-      `Keyword "${keyword}" terlalu jarang muncul (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%. Sebarkan di beberapa paragraf secara alami.`,
-      '',
-    );
+    return {
+      ...result(
+        16,
+        'failed',
+        `Keyword "${keyword}" terlalu jarang muncul (${density.toFixed(2)}%). Idealnya ${MIN_KEYWORD_DENSITY}-${MAX_KEYWORD_DENSITY}%. Sebarkan di beberapa paragraf secara alami.`,
+        '',
+      ),
+      auto_correct_button: true,
+    };
   }
   if (density > MAX_KEYWORD_DENSITY) {
     return result(
@@ -381,12 +395,17 @@ function checkKeywordDensity(parsed: ParsedArticle, keyword: string): CheckResul
     );
   }
   if (!leadHasKw) {
-    return result(
-      16,
-      'failed',
-      `Keyword "${keyword}" belum muncul di lead. Sebaiknya kalimat pembuka mengandung keyword agar pembaca langsung paham topik.`,
-      parsed.lead,
-    );
+    return {
+      ...result(
+        16,
+        'info',
+        `Keyword "${keyword}" belum muncul di lead. Sebaiknya kalimat pembuka mengandung keyword agar pembaca langsung paham topik.`,
+        parsed.lead || parsed.title,
+        parsed.lead || parsed.title,
+        'lead',
+      ),
+      auto_correct_button: true,
+    };
   }
   if (headingsWithKw === 0) {
     return result(
@@ -424,6 +443,8 @@ function checkSentenceLength(parsed: ParsedArticle): CheckResult {
       'failed',
       `${longSentences.length} kalimat melebihi ${MAX_SENTENCE_WORDS} kata (terpanjang ${worst.words} kata). Pecah kalimat panjang agar lebih mudah dibaca.`,
       allTexts,
+      worst.text,
+      'sentence',
     );
   }
   return result(

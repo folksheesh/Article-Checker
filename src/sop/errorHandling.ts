@@ -1,4 +1,4 @@
-export type AiErrorType = 'rate_limit' | 'quota' | 'timeout' | 'network' | 'unknown';
+export type AiErrorType = 'rate_limit' | 'quota' | 'timeout' | 'network' | 'unknown' | 'abort';
 
 export type AiFeature =
   | 'sop-ai-eval'
@@ -26,6 +26,7 @@ export const AI_ERROR_MESSAGES: Record<AiErrorType, string> = {
     'Koneksi ke server terputus. Periksa koneksi internet Anda dan coba lagi.',
   unknown:
     'Terjadi kendala saat memproses pengecekan. Silakan coba lagi, atau hubungi admin jika masalah berlanjut.',
+  abort: '',
 };
 
 export function classifyAiError(err: unknown): AiErrorInfo {
@@ -41,7 +42,7 @@ export function classifyAiError(err: unknown): AiErrorInfo {
   }
 
   if (err instanceof DOMException && err.name === 'AbortError') {
-    return { type: 'timeout', userMessage: AI_ERROR_MESSAGES.timeout, technicalDetail: msg };
+    return { type: 'abort', userMessage: '', technicalDetail: msg };
   }
 
   if (/timeout|timed ?out/i.test(lower)) {
@@ -56,5 +57,6 @@ export function classifyAiError(err: unknown): AiErrorInfo {
 }
 
 export function logAiError(feature: AiFeature, error: AiErrorInfo): void {
+  if (error.type === 'abort') return;
   console.error(`[AI Error][${feature}] type=${error.type} detail=${error.technicalDetail}`);
 }

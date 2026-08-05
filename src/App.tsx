@@ -59,7 +59,7 @@ import { AiErrorProvider, AiErrorFallback, useAiError } from './sop/AiErrorConte
 import { classifyAiError, logAiError } from './sop/errorHandling';
 
 type HighlightMode = 'sop' | 'ai-detector' | 'plagiarism';
-type HoverKind = 'sop' | 'ai-detector' | 'plagiarism';
+type HoverKind = 'sop' | 'ai-detector' | 'plagiarism' | 'suggestion';
 type HoverData = {
   x: number;
   y: number;
@@ -69,6 +69,15 @@ type HoverData = {
   text: string;
   score?: number;
   issue?: CheckResult;
+  originalText?: string;
+  suggestionId?: string;
+};
+
+export type PendingSuggestion = {
+  id: string;
+  issueId: number;
+  originalText: string;
+  correctedText: string;
 };
 
 const AI_SENTENCE_HIGHLIGHT_THRESHOLD = 60;
@@ -82,7 +91,8 @@ const CATEGORIES = [
   { id: 'body', label: 'Isi Tubuh', checks: [5, 6, 12] },
   { id: 'language', label: 'Bahasa', checks: [9, 11] },
   { id: 'cta', label: 'CTA', checks: [10] },
-  { id: 'seo', label: 'SEO & Meta', checks: [13, 14, 15, 16] },
+  { id: 'seo', label: 'SEO & Meta', checks: [13, 14, 15] },
+  { id: 'seo_keyword', label: 'SEO Keyword', checks: [16] },
 ];
 
 const SUGGESTED_LABELS: Record<number, string> = {
@@ -302,21 +312,58 @@ function findTextMatch(text: string, query: string): { start: number; end: numbe
   if (!query) return null;
   const q = query.replace(/\s+/g, ' ').trim();
   const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const tryMatch = (str: string): { start: number; end: number } | null => {
-    const escaped = esc(str).replace(/ /g, '\\s+');
+
+  const tryExact = (str: string): { start: number; end: number } | null => {
+    const escaped = esc(str).replace(/\s+/g, '\\s+');
     const re = new RegExp(escaped, 'i');
     const m = re.exec(text);
     return m ? { start: m.index, end: m.index + m[0].length } : null;
   };
 
-  let r = tryMatch(q);
+  // 1. Exact match (spaces flexible)
+  let r = tryExact(q);
   if (r) return r;
 
-  const clean = q.replace(/[.!?,;:]+$/g, '');
-  if (clean.length > 10) { r = tryMatch(clean); if (r) return r; }
+  // 1b. Try exact match but stripping asterisks/formatting from the query
+  const qStripped = q.replace(/[*_`~]/g, '');
+  if (qStripped !== q) {
+    r = tryExact(qStripped);
+    if (r) return r;
+  }
 
-  const firstSen = q.split(/[.!?]/)[0];
-  if (firstSen && firstSen.length > 10) { r = tryMatch(firstSen); if (r) return r; }
+  // 2. Flexible match allowing markdown formatting chars (* _ ` ~), punctuation, and HTML tags between words
+  const cleanWords = q.replace(/[*_`~]/g, '').split(/\s+/).filter(Boolean).map((w) => esc(w.replace(/[^\w\s]/g, ''))).filter(Boolean);
+  if (cleanWords.length > 1) {
+    const pattern = cleanWords.join('(?:[\\s*_`~]|<[^>]+>|[^a-zA-Z0-9])+');
+    try {
+      const re = new RegExp(pattern, 'i');
+      const m = re.exec(text);
+      if (m) return { start: m.index, end: m.index + m[0].length };
+    } catch { /* ignore invalid regex */ }
+  }
+
+  // 3. Strip trailing punctuation and retry
+  const clean = q.replace(/[.!?,;:]+$/g, '');
+  if (clean.length > 10) {
+    r = tryExact(clean);
+    if (r) return r;
+  }
+
+  // 4. First sentence only (strip formatting for the split)
+  const firstSen = q.replace(/[*_`~]/g, '').split(/[.!?]/)[0];
+  if (firstSen && firstSen.length > 10) {
+    r = tryExact(firstSen);
+    if (r) return r;
+    const senWords = firstSen.split(/\s+/).filter(Boolean).map(esc);
+    if (senWords.length > 1) {
+      const pattern = senWords.join('(?:[\\s*_`~]|<[^>]+>)+');
+      try {
+        const re = new RegExp(pattern, 'i');
+        const m = re.exec(text);
+        if (m) return { start: m.index, end: m.index + m[0].length };
+      } catch { /* ignore */ }
+    }
+  }
 
   return null;
 }
@@ -515,6 +562,7 @@ function AppContent() {
   const [chatInput, setChatInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [draftSaved, setDraftSaved] = useState(false);
+  const [, setPendingSuggestions] = useState<PendingSuggestion[]>([]);
   const [activeEvalTab, setActiveEvalTab] = useState<'sop' | 'ai-detector' | 'plagiarism'>('sop');
   const [aiDetectorResult, setAiDetectorResult] = useState<AIDetectionResult | null>(null);
   const [aiDetectorLoading, setAiDetectorLoading] = useState(false);
@@ -528,6 +576,7 @@ function AppContent() {
   const [evaluationAccuracy, setEvaluationAccuracy] = useState<EvaluationAccuracy | null>(null);
   const [ignoredIds, setIgnoredIds] = useState<Set<number>>(new Set());
   const ignoredIdsRef = useRef<Set<number>>(new Set());
+  const pendingSuggestionsRef = useRef<PendingSuggestion[]>([]);
   const [approvedIds, setApprovedIds] = useState<Set<number>>(new Set());
   const approvedIdsRef = useRef<Set<number>>(new Set());
   const [hasChecked, setHasChecked] = useState(false);
@@ -1040,17 +1089,39 @@ function AppContent() {
       if (!idsAttr) return;
       const firstId = Number(idsAttr.split(',')[0]);
       if (isNaN(firstId)) return;
-      // Distinguish AI evaluation items (class "issue-highlight-ai" or "issue-highlight-error") from SOP rule items
-      const isAiItem = target.classList.contains('issue-highlight-ai') || target.classList.contains('issue-highlight-error');
-      const issue = isAiItem
-        ? aiResults?.results.find((item) => item.id === firstId)
-        : activeReport?.items.find((item) => item.id === firstId);
+      const issue = activeReport?.items.find((item) => item.id === firstId)
+        || aiResults?.results.find((item) => item.id === firstId);
       if (!issue) return;
       popup = {
         x: 0, y: 0, kind,
         label: issue.question,
         reason: issue.reason,
         text: issue.problematic_text,
+        issue,
+      };
+    } else if (kind === 'suggestion') {
+      const label = target.dataset.label || 'Perubahan AI';
+      const reason = target.dataset.reason || '';
+      const text = target.dataset.text || target.textContent || '';
+      const suggestionId = target.dataset.suggestionId;
+      const originalText = target.dataset.original;
+      
+      const idsAttr = target.dataset.issueIds || target.dataset.issueId;
+      let issue = undefined;
+      if (idsAttr) {
+        const firstId = Number(idsAttr.split(',')[0]);
+        if (!isNaN(firstId)) {
+          issue = activeReport?.items.find((item) => item.id === firstId);
+        }
+      }
+      
+      popup = {
+        x: 0, y: 0, kind,
+        label,
+        reason,
+        text,
+        suggestionId,
+        originalText,
         issue,
       };
     } else {
@@ -1186,6 +1257,8 @@ function AppContent() {
       issueIds?: number[];
       startIndex?: number | null;
       endIndex?: number | null;
+      suggestionId?: string;
+      originalText?: string;
     };
 
     const ranges: HighlightRange[] = [];
@@ -1214,14 +1287,18 @@ function AppContent() {
         items: reportToApply.items.filter((item) => !ignoredIds.has(item.id)),
       };
 
-      const issues = reportToApply.items.filter(
-        (item) => item.problematic_text?.trim().length > 0,
-      );
+      // Extract lead text from article (first quoted sentence) for fallback highlighting
+      const leadMatch = article.match(/["“]([^\"”]+)["”]/);
+      const leadText = leadMatch ? leadMatch[1] : '';
+
+      const issues = reportToApply.items.filter((item) => item.status !== 'passed');
       for (const issue of issues) {
-        const texts = issue.problematic_text.split('|||');
+        const textsRaw = issue.problematic_text?.split('|||').filter(Boolean) ?? [];
+        const texts = textsRaw.length > 0 ? textsRaw : (leadText && issue.question.toLowerCase().includes('lead') ? [leadText] : []);
         for (const pt of texts) {
           if (!pt.trim()) continue;
           let m: { start: number; end: number } | null = null;
+
 
           // For AI items with target_highlight, try sentence_context first then exact_word
           if (issue.source === 'ai' && issue.target_highlight) {
@@ -1244,7 +1321,6 @@ function AppContent() {
             m = findTextMatch(highlightedMd, pt);
           }
 
-          if (!m) continue;
           const isIgnored = ignoredIdsRef.current.has(issue.id);
           let cls: string;
           if (isIgnored) {
@@ -1252,11 +1328,11 @@ function AppContent() {
           } else if (issue.source === 'ai') {
             cls = issue.status === 'passed' ? 'issue-highlight-passed' : (issue.category === 'Error' ? 'issue-highlight-error' : 'issue-highlight-ai');
           } else {
-            cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight';
+            cls = issue.status === 'passed' ? 'issue-highlight-passed' : 'issue-highlight-error';
           }
           ranges.push({
-            start: m.start,
-            end: m.end,
+            start: m ? m.start : 0,
+            end: m ? m.end : 0,
             cls,
             kind: 'sop',
             label: issue.question,
@@ -1337,6 +1413,31 @@ function AppContent() {
         cursor = m.end;
       }
     }
+    
+    if (mode === 'sop') {
+      for (const sugg of pendingSuggestionsRef.current) {
+        let cursor = 0;
+        let count = 0;
+        while (count < 5) {
+          const m = findTextMatchAfter(highlightedMd, sugg.correctedText, cursor);
+          if (!m) break;
+          ranges.push({
+            start: m.start,
+            end: m.end,
+            cls: 'issue-highlight-suggestion',
+            kind: 'suggestion',
+            label: 'Perubahan AI',
+            reason: `Saran perbaikan otomatis dari AI.`,
+            text: sugg.correctedText,
+            issueIds: [sugg.issueId],
+            suggestionId: sugg.id,
+            originalText: sugg.originalText,
+          });
+          cursor = m.end;
+          count++;
+        }
+      }
+    }
 
     // Build highlight decorations from the ProseMirror document.
     // This avoids the destructive htmlToMarkdown → markdownToHtml round-trip
@@ -1354,6 +1455,8 @@ function AppContent() {
       score?: number;
       startIndex?: number | null;
       endIndex?: number | null;
+      suggestionId?: string;
+      originalText?: string;
     }[] = [];
 
     // Pre-build flat text segments from ProseMirror doc for cross-node regex matching.
@@ -1374,7 +1477,7 @@ function AppContent() {
 
     const fuzzyRe = (s: string) =>
       new RegExp(
-        s.replace(/\s+/g, ' ').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'),
+        s.replace(/[\s\u200B\u200C\u200D\uFEFF]+/g, ' ').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '[\\s\\u200B\\u200C\\u200D\\uFEFF]*'),
         'i',
       );
 
@@ -1409,13 +1512,32 @@ function AppContent() {
       const re = fuzzyRe(text);
       let found = findMatch(re);
       if (!found) {
-        // Fallback: strip trailing punctuation (same as findTextMatch)
+        // Fallback 1: strip trailing punctuation (same as findTextMatch)
         const clean = text.replace(/[.!?,;:]+$/g, '');
         if (clean.length > 10) {
           const re2 = fuzzyRe(clean);
           found = findMatch(re2);
         }
       }
+      if (!found) {
+        // Fallback 2: ULTIMATE MATCH! Just match the first 10 words, completely ignoring any punctuation or weird invisible characters between them.
+        const words = text.replace(/[^\w\s]/gi, ' ').split(/\s+/).filter(Boolean).slice(0, 10);
+        if (words.length >= 3) {
+          const esc = (str: string) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const ultimateRegex = new RegExp(words.map(esc).join('[^a-zA-Z0-9]+'), 'i');
+          found = findMatch(ultimateRegex);
+        }
+      }
+
+      if (!found) continue;
+
+      console.log('DEBUG HIGHLIGHT:', {
+        label: range.label,
+        reason: range.reason,
+        textToFind: text.substring(0, 30) + '...',
+        found: !!found,
+        fullDocLength: fullDocText.length,
+      });
 
       if (!found) continue;
 
@@ -1431,11 +1553,14 @@ function AppContent() {
         score: range.score,
         startIndex: range.startIndex,
         endIndex: range.endIndex,
+        suggestionId: range.suggestionId,
+        originalText: range.originalText,
       });
     }
 
     // Sort and merge overlapping decorations with class priority
     const clsPriority = (c: string) => {
+      if (c.includes('issue-highlight-suggestion')) return 5;
       if (c.includes('issue-highlight-ai')) return 4;
       if (c.includes('issue-highlight-error')) return 3;
       if (c.includes('issue-highlight-ignored')) return 2;
@@ -1447,9 +1572,18 @@ function AppContent() {
     for (const fp of foundPositions) {
       const prev = merged[merged.length - 1];
       if (prev && fp.from < prev.to) {
-        // Yellow (issue-highlight-ai) wins over red (issue-highlight-error / issue-highlight)
+        // Higher priority class wins; propagate its metadata too
         if (clsPriority(fp.cls) > clsPriority(prev.cls)) {
           prev.cls = fp.cls;
+          // Carry suggestion metadata if suggestion wins
+          if (fp.cls.includes('issue-highlight-suggestion')) {
+            prev.kind = fp.kind;
+            prev.text = fp.text;
+            prev.reason = fp.reason;
+            prev.label = fp.label;
+            prev.suggestionId = fp.suggestionId;
+            prev.originalText = fp.originalText;
+          }
         }
         prev.to = Math.max(prev.to, fp.to);
         if (fp.issueIds) {
@@ -1473,10 +1607,13 @@ function AppContent() {
       if (typeof fp.score === 'number') attrs['data-score'] = String(fp.score);
       if (fp.startIndex != null) attrs['data-start-index'] = String(fp.startIndex);
       if (fp.endIndex != null) attrs['data-end-index'] = String(fp.endIndex);
+      if (fp.suggestionId) attrs['data-suggestion-id'] = fp.suggestionId;
+      if (fp.originalText) attrs['data-original'] = fp.originalText.replace(/"/g, '&quot;');
       const active = activeIssueId != null && fp.issueIds?.includes(activeIssueId);
       return { from: fp.from, to: fp.to, cls: active ? `${fp.cls} issue-highlight-active` : fp.cls, attrs };
     });
 
+    console.log('DEBUG DECOS:', decos);
     handle.setDecorations(decos);
   };
 
@@ -1493,7 +1630,9 @@ function AppContent() {
     // Validate target text actually exists in article before attempting scroll/highlight
     const html = handle.getHTML();
     const plainText = getTextContent(html);
-    if (!targetText || !plainText.toLowerCase().includes(targetText.trim().toLowerCase())) return;
+    const markdownText = htmlToMarkdown(html);
+    const hasMatch = findTextMatch(plainText, targetText) || findTextMatch(markdownText, targetText);
+    if (!targetText || !hasMatch) return;
 
     // 1. Try to find the exact highlighted mark by data-issue-ids (plural) or data-issue-id (singular)
     const allMarksWithIds = Array.from(
@@ -1639,6 +1778,138 @@ const handleAutoCorrect = async (item: CheckResult) => {
   pushUndo();
   setFixingId(item.id);
 
+  // Special handler for SEO Keyword distribution (Check 16)
+  if (item.id === 16 && !item.problematic_text?.trim()) {
+    const kw = getPrimaryKeyword(keyword).toLowerCase();
+    const currentCount = article.toLowerCase().split(kw).length - 1;
+    const targetCount = Math.ceil(0.5 * (wordCount / 100));
+    const missingCount = Math.max(3, targetCount - currentCount + 1);
+
+    try {
+      const { content } = await callChatCompletion({
+        messages: [
+          {
+            role: 'system',
+            content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Artikel ini memiliki masalah penyebaran keyword utama: "${keyword}".
+Alasan: "${item.reason || '-'}"
+
+Tugas Anda: Temukan ${missingCount} kalimat atau paragraf dalam artikel yang dapat dimodifikasi untuk menyisipkan keyword "${keyword}" secara alami tanpa merusak makna.
+Kembalikan JSON array koreksi:
+[ { "original_text": "...", "corrected_text": "..." } ]
+
+Aturan:
+- original_text HARUS KUTIPAN VERBATIM PERSIS dari artikel aslinya.
+- corrected_text adalah versi yang sudah disisipkan keyword secara natural.
+- JANGAN mengembalikan seluruh artikel. HANYA array JSON.`,
+          },
+          { role: 'user', content: article },
+        ],
+        temperature: 0.2,
+        timeoutMs: 30000,
+      });
+
+      let corrections: Correction[] = [];
+      try { corrections = JSON.parse(content); } catch { corrections = []; }
+      if (!Array.isArray(corrections)) corrections = [];
+      corrections = corrections.filter((c) => c.original_text && c.corrected_text);
+
+      if (corrections.length > 0) {
+        const { result: newArticle, applied } = applyCorrectionsToArticle(article, corrections);
+        if (applied > 0) {
+          setArticle(newArticle);
+          const newSuggestions = corrections.map(c => ({
+            id: Math.random().toString(36).substring(2, 9),
+            issueId: item.id,
+            originalText: c.original_text,
+            correctedText: c.corrected_text,
+          }));
+          const nextSuggestions = [...pendingSuggestionsRef.current, ...newSuggestions];
+          pendingSuggestionsRef.current = nextSuggestions;
+          setPendingSuggestions(nextSuggestions);
+          isUpdatingFromCodeRef.current = true;
+          if (editorRef.current) {
+            for (const c of corrections) {
+              editorRef.current.replaceText(c.original_text, c.corrected_text);
+            }
+          }
+          isUpdatingFromCodeRef.current = false;
+          setHover(null);
+          
+          const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
+          setLiveReport(newReport);
+          setReport(newReport);
+          requestAnimationFrame(() => applyHighlights(newReport));
+          setFlashText(`Auto Correct SEO berhasil (${applied} koreksi).`);
+          setTimeout(() => setFlashText(''), 3000);
+          setFixingId(null);
+          return;
+        }
+      }
+    } catch {
+      // Fall through to error
+    }
+    setFixingId(null);
+    return;
+  }
+
+  // Special handler for SEO Keyword in lead
+  if (item.id === 16 && item.reason?.includes('belum muncul di lead') && item.problematic_text) {
+    try {
+      const { content } = await callChatCompletion({
+        messages: [
+          {
+            role: 'system',
+            content: `Anda adalah asisten Auto-Correct Editor Konten Hukum.
+Tugas Anda: Modifikasi kalimat pembuka (lead) berikut agar menyertakan keyword utama "${keyword}" secara alami.
+Lead saat ini: "${item.problematic_text}"
+
+Kembalikan HANYA JSON array koreksi:
+[ { "original_text": "...", "corrected_text": "..." } ]
+Aturan:
+- original_text HARUS SAMA PERSIS dengan lead saat ini.
+- corrected_text adalah versi baru yang sudah mengandung keyword.`,
+          },
+          { role: 'user', content: 'Silakan perbaiki lead tersebut berdasarkan instruksi.' }
+        ],
+        temperature: 0.2,
+        timeoutMs: 20000,
+      });
+
+      let corrections: Correction[] = [];
+      try { corrections = JSON.parse(content); } catch { corrections = []; }
+      if (!Array.isArray(corrections)) corrections = [];
+      corrections = corrections.filter((c) => c.original_text && c.corrected_text);
+
+      if (corrections.length > 0) {
+        const { result: newArticle, applied } = applyCorrectionsToArticle(article, corrections);
+        if (applied > 0) {
+          setArticle(newArticle);
+          isUpdatingFromCodeRef.current = true;
+          if (editorRef.current) {
+            for (const c of corrections) {
+              editorRef.current.replaceText(c.original_text, c.corrected_text);
+            }
+          }
+          isUpdatingFromCodeRef.current = false;
+          setHover(null);
+          const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
+          setLiveReport(newReport);
+          setReport(newReport);
+          requestAnimationFrame(() => applyHighlights(newReport));
+          setFlashText('Auto Correct Lead berhasil.');
+          setTimeout(() => setFlashText(''), 3000);
+          setFixingId(null);
+          return;
+        }
+      }
+    } catch {
+      // Fall through to error
+    }
+    setFixingId(null);
+    return;
+  }
+
   // For AI evaluation items with auto_correct_button, use AI to generate fix
   if (item.auto_correct_button && item.source === 'ai') {
     try {
@@ -1698,17 +1969,25 @@ Aturan:
           return;
         }
 
-        const scrollY = window.scrollY;
         const newArticle = article.slice(0, m.start) + correction + article.slice(m.end);
         setArticle(newArticle);
         isUpdatingFromCodeRef.current = true;
         editorRef.current?.replaceText(targetWord, correction);
         isUpdatingFromCodeRef.current = false;
         setHover(null);
+
+        if (aiResults) {
+          setAiResults((prev) => {
+            if (!prev) return prev;
+            const nextResults = prev.results.map((r) => r.id === item.id ? { ...r, passed: true, status: 'passed' as const } : r);
+            return { ...prev, results: nextResults };
+          });
+        }
+
         const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
         setLiveReport(newReport);
         setReport(newReport);
-        requestAnimationFrame(() => { applyHighlights(newReport); window.scrollTo(0, scrollY); });
+        requestAnimationFrame(() => applyHighlights(newReport));
         setFlashText('Auto Correct berhasil.');
         setTimeout(() => setFlashText(''), 3000);
         return;
@@ -1841,7 +2120,6 @@ ATURAN:
         return;
       }
 
-      const scrollY2 = window.scrollY;
       setArticle(newArticle);
       // Apply to TipTap editor via surgical range replace (no setContent)
       isUpdatingFromCodeRef.current = true;
@@ -1864,7 +2142,7 @@ ATURAN:
       const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
       setLiveReport(newReport);
       setReport(newReport);
-      requestAnimationFrame(() => { applyHighlights(newReport); window.scrollTo(0, scrollY2); });
+      requestAnimationFrame(() => applyHighlights(newReport));
       setFlashText(`Auto Correct berhasil (${applied} koreksi, ${skipped} dilewati).`);
       setTimeout(() => setFlashText(''), 3000);
     } catch (err: unknown) {
@@ -1921,16 +2199,20 @@ Kembalikan JSON array koreksi:
           }
           isUpdatingFromCodeRef.current = false;
           setHover(null);
-          const nextIgnored4 = new Set(ignoredIds);
-          nextIgnored4.add(item.id);
-          setIgnoredIds(nextIgnored4);
-          ignoredIdsRef.current = nextIgnored4;
+          if (aiResults && item.source === 'ai') {
+            setAiResults((prev) => {
+              if (!prev) return prev;
+              const nextResults = prev.results.map((r) => r.id === item.id ? { ...r, passed: true, status: 'passed' as const } : r);
+              return { ...prev, results: nextResults };
+            });
+          }
           const newReport = runSopChecks({ article: newArticle, keyword, metaTitle, metaDesc });
           setLiveReport(newReport);
           setReport(newReport);
           requestAnimationFrame(() => applyHighlights(newReport));
           setFlashText('Auto Correct berhasil.');
           setTimeout(() => setFlashText(''), 3000);
+          setFixingId(null);
           return;
         }
       }
@@ -1939,13 +2221,61 @@ Kembalikan JSON array koreksi:
     }
   }
 
-  setFlashText('Auto Correct tidak tersedia untuk item ini.');
+  setFlashText('Auto Correct tidak tersedia atau gagal.');
   setTimeout(() => setFlashText(''), 3000);
   setHover(null);
-  const nextIgnored5 = new Set(ignoredIds);
-  nextIgnored5.add(item.id);
-  setIgnoredIds(nextIgnored5);
-  ignoredIdsRef.current = nextIgnored5;
+  setFixingId(null);
+};
+
+const handleAcceptSuggestion = (suggestionId: string) => {
+  const accepted = pendingSuggestionsRef.current.find(s => s.id === suggestionId);
+  const nextSuggestions = pendingSuggestionsRef.current.filter(s => s.id !== suggestionId);
+  pendingSuggestionsRef.current = nextSuggestions;
+  setPendingSuggestions(nextSuggestions);
+  setHover(null);
+
+  // Only re-evaluate (and potentially remove issue) when there are no more pending suggestions
+  // for this particular issue. This prevents issue from disappearing while there are still
+  // unreviewed green suggestions.
+  const hasMoreSuggestionsForIssue = accepted
+    ? nextSuggestions.some(s => s.issueId === accepted.issueId)
+    : false;
+
+  if (!hasMoreSuggestionsForIssue) {
+    if (accepted && accepted.issueId >= 51 && aiResults) {
+      setAiResults((prev) => {
+        if (!prev) return prev;
+        const nextResults = prev.results.map((r) => r.id === accepted.issueId ? { ...r, passed: true, status: 'passed' as const } : r);
+        return { ...prev, results: nextResults };
+      });
+    }
+
+    // All suggestions for this issue are resolved - re-evaluate keyword distribution
+    const currentMd = htmlToMarkdown(editorRef.current?.getHTML() || '') || article;
+    const newReport = runSopChecks({ article: currentMd, keyword, metaTitle, metaDesc });
+    setLiveReport(newReport);
+    setReport(newReport);
+    requestAnimationFrame(() => applyHighlights(newReport));
+  } else {
+    // Still have pending suggestions - just refresh highlights without re-evaluating
+    requestAnimationFrame(() => applyHighlights());
+  }
+};
+
+const handleRejectSuggestion = (suggestionId: string) => {
+  const sugg = pendingSuggestionsRef.current.find(s => s.id === suggestionId);
+  if (!sugg) return;
+  pushUndo();
+  isUpdatingFromCodeRef.current = true;
+  editorRef.current?.replaceText(sugg.correctedText, sugg.originalText);
+  isUpdatingFromCodeRef.current = false;
+  const currentMd = htmlToMarkdown(editorRef.current?.getHTML() || '');
+  setArticle(currentMd);
+  const nextSuggestions = pendingSuggestionsRef.current.filter(s => s.id !== suggestionId);
+  pendingSuggestionsRef.current = nextSuggestions;
+  setPendingSuggestions(nextSuggestions);
+  setHover(null);
+  requestAnimationFrame(() => applyHighlights());
 };
 
   const handleAutoCorrectCase = (item: CheckResult) => {
@@ -1970,6 +2300,15 @@ Kembalikan JSON array koreksi:
     editorRef.current?.replaceText(text, corrected);
     isUpdatingFromCodeRef.current = false;
     setHover(null);
+
+    if (item.id >= 51 && aiResults) {
+      setAiResults((prev) => {
+        if (!prev) return prev;
+        const nextResults = prev.results.map((r) => r.id === item.id ? { ...r, passed: true, status: 'passed' as const } : r);
+        return { ...prev, results: nextResults };
+      });
+    }
+
     const newReport = runSopChecks({ article: newMd, keyword, metaTitle, metaDesc });
     setLiveReport(newReport);
     setReport(newReport);
@@ -2186,19 +2525,6 @@ Kembalikan JSON SAJA: { "metaDescription": "..." }`,
     }
   };
 
-  const toggleKeyword = (kw: string) => {
-    setSelectedKeywords((prev) => {
-      const next = new Set(prev);
-      if (next.has(kw)) next.delete(kw);
-      else next.add(kw);
-      return next;
-    });
-  };
-
-  const selectAllKeywords = () => {
-    setSelectedKeywords(new Set(ahrefsMetrics.map((m) => m.keyword)));
-  };
-
   const deselectAllKeywords = () => {
     setSelectedKeywords(new Set());
   };
@@ -2206,18 +2532,10 @@ Kembalikan JSON SAJA: { "metaDescription": "..." }`,
   const applySelectedKeywords = () => {
     const selected = Array.from(selectedKeywords);
     if (selected.length > 0) {
-      const existing = keyword.split(',').map(k => k.trim()).filter(Boolean);
-      const existingLower = existing.map(k => k.toLowerCase());
-      const merged = [...existing];
-      for (const kw of selected) {
-        if (!existingLower.includes(kw.toLowerCase())) {
-          merged.push(kw);
-        }
-      }
-      setKeyword(merged.join(', '));
+      setKeyword(selected[0]);
     }
     setShowKwPopup(false);
-    setFlashText(`${selected.length} keyword dipilih`);
+    setFlashText(`Keyword diperbarui`);
     setTimeout(() => setFlashText(''), 2500);
   };
 
@@ -3088,7 +3406,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 <h2 className="text-sm font-bold text-surface-900 font-display tracking-tight transition-colors duration-300 group-hover:text-brand-700">Setup Artikel</h2>
                 <p className="text-[11px] text-surface-400 mt-0.5">Metadata dan fokus keyword</p>
               </div>
-              <span className="text-[10px] font-medium text-surface-500 bg-white border border-surface-200 px-2.5 py-1 rounded-md shadow-sm">{wordCount} kata</span>
+              {/* <span className="text-[10px] font-medium text-surface-500 bg-white border border-surface-200 px-2.5 py-1 rounded-md shadow-sm">{wordCount} kata</span> */}
             </div>
             <div className="section-meta-fields grid grid-cols-1 md:grid-cols-3 gap-4">
               <div id="meta-keyword-field" className="col-span-1 bg-white rounded-xl border border-surface-200 p-3 shadow-sm transition-all duration-300 hover:shadow-md hover:border-brand-300 group hover:-translate-y-0.5">
@@ -3112,7 +3430,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                     id="input-keyword"
                     type="text"
                     value={keyword}
-                    onChange={(e) => setKeyword(e.target.value)}
+                    onChange={(e) => setKeyword(e.target.value.replace(/,/g, ''))}
                     placeholder="mendaftarkan merek"
                     className="flex-1 min-w-0 bg-transparent border-b border-surface-200 hover:border-surface-300 focus:border-brand-500 outline-none py-1 text-sm text-surface-800 placeholder:text-surface-300 transition-colors"
                   />
@@ -3492,19 +3810,59 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                 <div id="issue-popup-body" className="overflow-y-auto px-4" style={{ maxHeight: '120px' }}>
                   <p id="issue-popup-reason" className="text-xs text-surface-600 leading-relaxed py-3">{hover.reason}</p>
 
-                  {!isSop && hover.text && (
-                    <div className="text-[10px] text-surface-500 bg-surface-50/50 border border-surface-200 rounded-lg px-2.5 py-1.5 mb-3 line-clamp-3 font-medium">"{hover.text}"</div>
-                  )}
-
-                  {isSop && !passed && (
-                    <div id="issue-popup-sop" className="bg-brand-50/50 rounded-lg p-2.5 text-[11px] text-surface-700 border border-brand-100 mb-3">
-                      <div className="font-bold text-brand-800 mb-1 flex items-center gap-1"><Sparkles className="w-3 h-3"/> SOP</div>
-                      {issue ? SUGGESTED_LABELS[issue.id] || 'Periksa kembali bagian ini sesuai SOP.' : ''}
+                  {hover.kind === 'suggestion' ? (
+                    <div className="bg-brand-50/50 rounded-lg p-2.5 text-[11px] text-surface-700 border border-brand-100 mb-3 space-y-2">
+                      <div>
+                        <div className="font-bold text-brand-800 mb-0.5 text-[9px] uppercase tracking-wider">Sebelum</div>
+                        <div className="line-through text-brand-700/70">{hover.originalText}</div>
+                      </div>
+                      <div>
+                        <div className="font-bold text-brand-800 mb-0.5 text-[9px] uppercase tracking-wider">Sesudah</div>
+                        <div className="text-brand-900 bg-brand-100/50 rounded px-1 py-0.5">{hover.text}</div>
+                      </div>
                     </div>
+                  ) : (
+                    <>
+                      {!isSop && hover.text && (
+                        <div className="text-[10px] text-surface-500 bg-surface-50/50 border border-surface-200 rounded-lg px-2.5 py-1.5 mb-3 line-clamp-3 font-medium">"{hover.text}"</div>
+                      )}
+
+                      {isSop && !passed && (
+                        <div id="issue-popup-sop" className="bg-brand-50/50 rounded-lg p-2.5 text-[11px] text-surface-700 border border-brand-100 mb-3">
+                          <div className="font-bold text-brand-800 mb-1 flex items-center gap-1"><Sparkles className="w-3 h-3"/> SOP</div>
+                          {issue ? SUGGESTED_LABELS[issue.id] || 'Periksa kembali bagian ini sesuai SOP.' : ''}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
                 <div id="issue-popup-actions" className="flex items-center justify-between px-4 pb-4 pt-2 border-t border-surface-100 shrink-0">
-                  {isSop && !passed && issue && issue.id === 56 ? (
+                  {hover.kind === 'suggestion' ? (
+                    <div className="flex items-center gap-2 w-full">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleRejectSuggestion(hover.suggestionId!);
+                        }}
+                        className="flex-1 text-[11px] font-semibold px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-all shadow-sm"
+                      >
+                        Tolak
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleAcceptSuggestion(hover.suggestionId!);
+                        }}
+                        className="flex-1 text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 transition-all shadow-sm"
+                      >
+                        Setuju
+                      </button>
+                    </div>
+                  ) : isSop && !passed && issue && issue.id === 56 ? (
                     <button
                       id="issue-popup-autocorrect-case"
                       type="button"
@@ -3548,19 +3906,18 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                       id="issue-popup-ignore"
                       type="button"
                       onClick={() => {
-                        const scrollY = window.scrollY;
                         const next = new Set(ignoredIds);
                         if (next.has(issue.id)) next.delete(issue.id); else next.add(issue.id);
                         setIgnoredIds(next);
                         ignoredIdsRef.current = next;
                         setHover(null);
-                        setTimeout(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); }, 50);
+                        setTimeout(() => applyHighlights(undefined, activeEvalTab), 50);
                       }}
                       className="text-[11px] font-semibold px-3 py-1.5 rounded-lg bg-surface-100 text-surface-700 hover:bg-red-50 hover:text-red-600 transition-colors"
                     >
                       {ignoredIds.has(issue.id) ? 'Batalkan' : 'Abaikan'}
                     </button>
-                  ) : (
+                  ) : hover.kind === 'suggestion' ? null : (
                     <button
                       type="button"
                       onClick={() => setHover(null)}
@@ -3890,21 +4247,21 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         const a: typeof CATEGORIES = [];
                         const b: typeof CATEGORIES = [];
                         const c: typeof CATEGORIES = [];
+                        // Categories that should always go to "Perlu Review" regardless of status
+                        const REVIEW_ONLY_CATS = new Set(['paragraph', 'heading']);
                         for (const cat of CATEGORIES) {
                           const st = getCategoryStatus(activeReport, cat.id);
-                          const i = getCategoryIssue(activeReport, cat.id);
                           const catItems = activeReport.items.filter((item) => cat.checks.includes(item.id));
                           const allApproved = catItems.length > 0 && catItems.every((item) => approvedIds.has(item.id) || item.status === 'passed');
                           if (st === 'passed' || allApproved) {
                             c.push(cat);
-                          } else if (i?.problematic_text?.trim()) {
+                          } else if (st === 'failed' && !REVIEW_ONLY_CATS.has(cat.id)) {
                             a.push(cat);
                           } else {
                             b.push(cat);
                           }
                         }
                         const toggleCategoryIgnore = (catId: string) => {
-                          const scrollY = window.scrollY;
                           const items = activeReport.items.filter((item) => CATEGORIES.find((c) => c.id === catId)?.checks.includes(item.id));
                           const isAlreadyIgnored = items.some((item) => ignoredIds.has(item.id));
                           const nextIgnored = new Set(ignoredIds);
@@ -3919,7 +4276,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           ignoredIdsRef.current = nextIgnored;
                           setApprovedIds(nextApproved);
                           approvedIdsRef.current = nextApproved;
-                          requestAnimationFrame(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); });
+                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
                         };
                         const renderRow = (cat: typeof CATEGORIES[0], clickable: boolean) => {
                           const iss = getCategoryIssue(activeReport, cat.id);
@@ -3933,8 +4290,8 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           const itemForReason = iss || catItems.find((item) => cat.checks.includes(item.id));
                           return (
                             <div key={cat.id} className={`flex items-center gap-1 transition-all duration-300 ease-in-out ${isIgnored ? 'opacity-60 scale-[0.98]' : 'opacity-100 scale-100'}`}>
-                              <button type="button" onClick={() => clickable && iss && !cardDisabled && focusIssue(iss)} disabled={cardDisabled}
-                                className={`flex-1 flex items-center gap-2.5 p-2.5 rounded-xl border-l-[3px] border transition-all duration-200 text-left group ${visualPassed ? 'bg-white border-emerald-100 border-l-emerald-400 cursor-default' : isIgnored ? 'bg-gray-50/50 border-gray-100 border-l-gray-200 cursor-default' : clickable ? 'bg-brand-50/50 border-brand-200 border-l-brand-500 hover:bg-brand-50/70 hover:border-brand-300 hover:shadow-sm cursor-pointer active:scale-[0.99]' : 'bg-brand-50/30 border-brand-100 border-l-brand-400 cursor-default'}`}>
+                              <div role="button" tabIndex={0} onKeyDown={(e) => { if(e.key === 'Enter' || e.key === ' ') { e.preventDefault(); clickable && iss && !cardDisabled && focusIssue(iss); } }} onClick={() => clickable && iss && !cardDisabled && focusIssue(iss)} aria-disabled={cardDisabled}
+                                className={`flex-1 flex items-center gap-2.5 p-2.5 rounded-xl border-l-[3px] border transition-all duration-200 text-left group outline-none focus:ring-2 focus:ring-brand-500/50 ${visualPassed ? 'bg-white border-emerald-100 border-l-emerald-400 cursor-default' : isIgnored ? 'bg-gray-50/50 border-gray-100 border-l-gray-200 cursor-default' : clickable ? 'bg-brand-50/50 border-brand-200 border-l-brand-500 hover:bg-brand-50/70 hover:border-brand-300 hover:shadow-sm cursor-pointer active:scale-[0.99]' : 'bg-brand-50/30 border-brand-100 border-l-brand-400 cursor-default'}`}>
                                 <div className="flex-1 min-w-0">
                                   <div className={`text-xs font-medium ${visualPassed ? 'text-emerald-600' : isIgnored ? 'text-gray-500' : 'text-gray-800'}`}>{cat.label}</div>
                                   {itemForReason && <div className="text-[10px] text-gray-400 leading-snug mt-0.5">
@@ -3945,9 +4302,22 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                       return <span className="ml-2 text-[9px] font-medium text-gray-300">{idx + 1}/{texts.length}</span>;
                                     })()}
                                   </div>}
+                                  {itemForReason?.auto_correct_button && !isPassed && !isIgnored && (
+                                    <div className="mt-2 text-left">
+                                      <button
+                                        type="button"
+                                        disabled={fixingId === itemForReason.id}
+                                        onClick={(e) => { e.stopPropagation(); handleAutoCorrect(itemForReason); }}
+                                        className={`inline-flex text-[10px] font-semibold px-3 py-1.5 rounded-xl text-white disabled:opacity-50 transition items-center gap-1.5 shadow-sm bg-red-600 hover:bg-red-700`}
+                                      >
+                                        {fixingId === itemForReason.id ? <Loader className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5" />}
+                                        {fixingId === itemForReason.id ? 'Memperbaiki...' : 'Auto Correct'}
+                                      </button>
+                                    </div>
+                                  )}
                                 </div>
                                 {visualPassed ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> : isIgnored ? <CheckCircle2 className="w-3.5 h-3.5 text-gray-300 shrink-0" /> : clickable && <ArrowRight className="w-3.5 h-3.5 text-gray-300 shrink-0 opacity-0 group-hover:opacity-100 transition" />}
-                              </button>
+                              </div>
                               {!visualPassed && !allIgnored && (
                                 <div className="flex items-center gap-0.5">
                                   <button type="button" onClick={() => toggleCategoryIgnore(cat.id)}
@@ -3972,7 +4342,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                         return (
                           <>
                             {a.length > 0 && <div className="space-y-2"><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-600 uppercase tracking-wider mb-1.5 px-0.5"><AlertCircle className="w-3 h-3" /> Dapat Diperbaiki</div>{a.map((c) => renderRow(c, true))}</div>}
-                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-500 uppercase tracking-wider mb-1.5 px-0.5"><Info className="w-3 h-3" /> Perlu Review</div>{b.map((c) => renderRow(c, false))}</div>}
+                            {b.length > 0 && <div className={a.length > 0 ? 'mt-5 space-y-2' : 'space-y-2'}><div className="flex items-center gap-1.5 text-[10px] font-semibold text-surface-500 uppercase tracking-wider mb-1.5 px-0.5"><Info className="w-3 h-3" /> Perlu Review</div>{b.map((c) => { const bIss = getCategoryIssue(activeReport, c.id); return renderRow(c, !!(bIss?.problematic_text?.trim())); })}</div>}
                             {c.length > 0 && (
                               <div className="mt-4 pt-3 border-t border-gray-100">
                                 <button type="button" onClick={() => setShowPassedIssues(!showPassedIssues)}
@@ -4015,7 +4385,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
 
                        {hasChecked && aiResults && aiResults.results.length > 0 && (() => {
                         const toggleAiIgnore = (id: number) => {
-                          const scrollY = window.scrollY;
                           const next = new Set(ignoredIds);
                           if (next.has(id)) next.delete(id); else next.add(id);
                           setIgnoredIds(next);
@@ -4024,7 +4393,7 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           nextApproved.delete(id);
                           setApprovedIds(nextApproved);
                           approvedIdsRef.current = nextApproved;
-                          requestAnimationFrame(() => { applyHighlights(undefined, activeEvalTab); window.scrollTo(0, scrollY); });
+                          requestAnimationFrame(() => applyHighlights(undefined, activeEvalTab));
                         };
                         const visibleAiResults = aiResults.results.filter((r) => {
                           if (r.status === 'deferred') return true;
@@ -4044,7 +4413,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           <>
                             <div className="space-y-5">
                               {visibleAiResults.map((r) => {
-                                const score = r.aiConfidence || 0;
                                 const passed = r.status === 'passed';
                                 const isError = r.category === 'Error' && !passed;
                                 const hasText = !!r.problematic_text?.trim();
@@ -4069,11 +4437,6 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                         <div className="flex-1 min-w-0">
                                           <div className="flex items-center gap-2 mb-1.5">
                                             <div className="text-[13px] font-semibold text-gray-800 leading-snug">{r.question}</div>
-                                            {!passed && r.category && (
-                                              <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${isError ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-yellow-50 text-yellow-600 border border-yellow-200'}`}>
-                                                {r.category}
-                                              </span>
-                                            )}
                                           </div>
                                           <div className="text-[11px] text-gray-500 leading-relaxed mb-1">{r.reason || '-'}</div>
                                           {hasText && (
@@ -4089,24 +4452,14 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                                               type="button"
                                               disabled={fixingId === r.id}
                                               onClick={(e) => { e.stopPropagation(); handleAutoCorrect(r); }}
-                                              className={`mt-2 text-[10px] font-semibold px-3 py-1.5 rounded-xl text-white disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm ${isError ? 'bg-red-600 hover:bg-red-700' : 'bg-yellow-500 hover:bg-yellow-600'}`}
+                                              className={`mt-2 text-[10px] font-semibold px-3 py-1.5 rounded-xl text-white disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm bg-red-600 hover:bg-red-700`}
                                             >
                                               {fixingId === r.id ? <Loader className="w-2.5 h-2.5 animate-spin" /> : <Sparkles className="w-2.5 h-2.5" />}
                                               {fixingId === r.id ? 'Memperbaiki...' : 'Auto Correct'}
                                             </button>
                                           )}
                                         </div>
-                                        {!passed && (
-                                          <div className="flex flex-col items-center gap-1 shrink-0 min-w-[28px]">
-                                            <span className={`text-[11px] font-bold ${passed ? 'text-emerald-600' : isError ? 'text-red-500' : 'text-yellow-500'}`}>{score}</span>
-                                          </div>
-                                        )}
                                       </div>
-                                      {!passed && (
-                                        <div className="mt-2.5 w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                                          <div className={`h-full rounded-full transition-all ${passed ? 'bg-emerald-400' : isError ? 'bg-red-400' : 'bg-yellow-400'}`} style={{ width: `${score}%` }} />
-                                        </div>
-                                      )}
                                     </Card>
                                     {!passed && !isIgnored && (
                                       <div className="flex flex-col items-center gap-0.5 mt-2">
@@ -4405,25 +4758,18 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
 
               {ahrefsMetrics.length > 0 ? (
                 (() => {
+                  const filteredMetrics = ahrefsMetrics.filter((m) => computeRelevance(m.keyword, stripImages(article)) >= 5);
                   const PER_PAGE = 10;
-                  const totalPages = Math.ceil(ahrefsMetrics.length / PER_PAGE);
+                  const totalPages = Math.ceil(filteredMetrics.length / PER_PAGE);
                   const start = (kwPage - 1) * PER_PAGE;
-                  const pageItems = ahrefsMetrics.slice(start, start + PER_PAGE);
+                  const pageItems = filteredMetrics.slice(start, start + PER_PAGE);
                   return (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <p className="text-xs text-gray-500">
-                      {ahrefsMetrics.length} keyword · {selectedKeywords.size} dipilih
+                      {filteredMetrics.length} keyword · {selectedKeywords.size} dipilih
                     </p>
                     <div className="flex gap-2">
-                      <button
-                        id="kw-modal-select-all"
-                        type="button"
-                        onClick={selectAllKeywords}
-                        className="px-2.5 py-1 text-[10px] font-medium text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
-                      >
-                        Pilih semua
-                      </button>
                       <button
                         id="kw-modal-deselect-all"
                         type="button"
@@ -4457,10 +4803,11 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
                           <tr key={m.keyword} className="border-b border-gray-100 last:border-0 hover:bg-gray-50">
                             <td className="px-2 py-2">
                               <input
-                                type="checkbox"
+                                type="radio"
+                                name="ahrefs-keyword-select"
                                 checked={selectedKeywords.has(m.keyword)}
-                                onChange={() => toggleKeyword(m.keyword)}
-                                className="w-3.5 h-3.5 rounded border-gray-300 text-red-700 focus:ring-red-200"
+                                onChange={() => setSelectedKeywords(new Set([m.keyword]))}
+                                className="w-3.5 h-3.5 border-gray-300 text-red-700 focus:ring-red-200 cursor-pointer"
                               />
                             </td>
                             <td className="px-2 py-2 text-gray-800 font-medium truncate max-w-[140px]" title={m.keyword}>{m.keyword}</td>
@@ -4675,13 +5022,22 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
         .editor-surface img { max-width: 100%; border-radius: 0.5rem; }
 
         .issue-highlight {
-          background-color: rgba(254, 226, 226, 0.7);
-          border-bottom: 2px solid rgba(239, 68, 68, 0.3);
-          border-radius: 2px;
+          background-color: rgba(254, 202, 202, 0.8);
+          border-bottom: 2.5px solid #dc2626;
+          border-radius: 3px;
           cursor: pointer;
         }
         .issue-highlight:hover {
-          background-color: rgba(254, 202, 202, 0.9);
+          background-color: rgba(252, 165, 165, 0.95);
+        }
+        .issue-highlight-suggestion {
+          background-color: rgba(209, 250, 229, 0.6); /* emerald-100 */
+          border-bottom: 2px dashed rgba(16, 185, 129, 0.8); /* emerald-500 */
+          border-radius: 2px;
+          cursor: pointer;
+        }
+        .issue-highlight-suggestion:hover {
+          background-color: rgba(167, 243, 208, 0.8); /* emerald-200 */
         }
         .issue-highlight-passed {
           background-color: rgba(187, 247, 208, 0.5);
@@ -4702,16 +5058,17 @@ Butuh bantuan mendaftarkan merek agar bebas dari risiko penolakan? Konsultasikan
           background-color: rgba(252, 225, 138, 0.85);
         }
         .issue-highlight-error {
-          background-color: rgba(254, 226, 226, 0.7);
-          border-bottom: 2px solid rgba(220, 38, 38, 0.4);
-          border-radius: 2px;
+          background-color: rgba(254, 202, 202, 0.85);
+          border-bottom: 2.5px solid #dc2626;
+          border-radius: 3px;
           cursor: pointer;
         }
         .issue-highlight-error:hover {
-          background-color: rgba(252, 165, 165, 0.85);
+          background-color: rgba(252, 165, 165, 0.95);
         }
         .issue-highlight-active {
-          box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.6), 0 0 0 4px rgba(250, 204, 21, 0.25);
+          box-shadow: 0 0 0 2.5px #dc2626, 0 0 0 5px rgba(220, 38, 38, 0.3);
+          background-color: rgba(254, 202, 202, 1) !important;
           border-radius: 3px;
         }
         .issue-highlight-detector {

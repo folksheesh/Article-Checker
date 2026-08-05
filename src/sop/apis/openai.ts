@@ -63,7 +63,7 @@ export async function callChatCompletion({
 
   if (geminiKey) {
     providers.push({
-      name: 'gemini', key: geminiKey, call: () => callGemini({ messages, model: geminiModel, temperature, timeoutMs, signal, apiKey: geminiKey, stripJsonBlock }),
+      name: 'gemini', key: geminiKey, call: () => callGeminiWithFallback({ messages, model: geminiModel, temperature, timeoutMs, signal, apiKey: geminiKey, stripJsonBlock }),
     });
   }
 
@@ -79,13 +79,16 @@ export async function callChatCompletion({
   for (const p of providers) {
     try {
       if (p.name === 'gemini') {
-        console.log(`[AI Model] provider=gemini model=${geminiModel}`);
+        console.log(`[AI Model] provider=gemini model=${activeGeminiModel || geminiModel}`);
       } else {
         console.log(`[AI Model] provider=${p.name}`);
       }
       const result = await p.call();
       return result;
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw err;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`${p.name}: ${msg}`);
       // For Gemini quota errors, always fall through to next provider
@@ -98,6 +101,48 @@ export async function callChatCompletion({
   }
 
   throw new Error(`Semua provider AI gagal.\n${errors.join('\n')}`);
+}
+
+// Memory of currently active working Gemini model
+let activeGeminiModel: string | null = null;
+
+async function callGeminiWithFallback(opts: Required<Pick<ChatCompletionOptions, 'messages' | 'model' | 'temperature' | 'timeoutMs'>> &
+  Pick<ChatCompletionOptions, 'signal' | 'apiKey' | 'stripJsonBlock'>): Promise<ChatCompletionResult> {
+  const defaultCandidates = [
+    opts.model,
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+  ];
+
+  // Prioritize active model if set, otherwise start with preferred candidates
+  const candidateModels = Array.from(new Set(
+    activeGeminiModel
+      ? [activeGeminiModel, ...defaultCandidates]
+      : defaultCandidates
+  )).filter(Boolean);
+
+  const errors: string[] = [];
+
+  for (const m of candidateModels) {
+    try {
+      console.log(`[Gemini Auto-Switch Try] model=${m}`);
+      const res = await callGemini({ ...opts, model: m });
+      // Successfully called - remember working model for future calls
+      if (activeGeminiModel !== m) {
+        console.log(`[Gemini Auto-Switch Success] Active model set to: ${m}`);
+        activeGeminiModel = m;
+      }
+      return res;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(`${m}: ${msg}`);
+      console.warn(`[Gemini Auto-Switch Warning] Model ${m} failed (${msg}). Switching to next fallback model...`);
+    }
+  }
+
+  throw new Error(`Semua model Gemini gagal.\n${errors.join('\n')}`);
 }
 
 async function callGemini({

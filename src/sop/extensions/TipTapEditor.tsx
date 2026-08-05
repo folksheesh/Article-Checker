@@ -55,6 +55,7 @@ export interface TipTapEditorHandle {
    * Returns true if text was found and replaced.
    */
   replaceText: (oldText: string, newText: string) => boolean;
+  setSelection: (from: number, to: number) => void;
 }
 
 interface Props {
@@ -408,8 +409,11 @@ export const TipTapEditor = forwardRef<TipTapEditorHandle, Props>(({ initialCont
         });
       });
       if (from === -1) return false;
-      editor.chain().focus().insertContentAt({ from, to }, newText).run();
+      editor.chain().insertContentAt({ from, to }, newText).run();
       return true;
+    },
+    setSelection: (from: number, to: number) => {
+      editor?.commands.setTextSelection({ from, to });
     },
   }), [editor]);
 
